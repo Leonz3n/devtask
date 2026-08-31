@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
@@ -47,6 +48,14 @@ func Initialize(paths Paths) error {
 }
 
 func writeAtomic(path string, contents []byte, mode os.FileMode) error {
+	return writeAtomicChecked(path, contents, mode, nil)
+}
+
+func writeAtomicIfUnchanged(path string, original, contents []byte, mode os.FileMode) error {
+	return writeAtomicChecked(path, contents, mode, original)
+}
+
+func writeAtomicChecked(path string, contents []byte, mode os.FileMode, original []byte) error {
 	directory := filepath.Dir(path)
 	temporary, err := os.CreateTemp(directory, ".config.yaml-*")
 	if err != nil {
@@ -71,6 +80,15 @@ func writeAtomic(path string, contents []byte, mode os.FileMode) error {
 	}
 	if err := temporary.Close(); err != nil {
 		return err
+	}
+	if original != nil {
+		current, err := os.ReadFile(path)
+		if err != nil {
+			return fmt.Errorf("re-read before replacing: %w", err)
+		}
+		if !bytes.Equal(current, original) {
+			return ErrConcurrentEdit
+		}
 	}
 	if err := os.Rename(temporaryPath, path); err != nil {
 		return err

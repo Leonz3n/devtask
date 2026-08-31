@@ -87,6 +87,10 @@ func Load(path string) (Config, error) {
 	if err != nil {
 		return Config{}, fmt.Errorf("read configuration: %w", err)
 	}
+	return decode(contents)
+}
+
+func decode(contents []byte) (Config, error) {
 	var header struct {
 		SchemaVersion *int `yaml:"schema_version"`
 	}
@@ -114,6 +118,16 @@ func Load(path string) (Config, error) {
 		return Config{}, err
 	}
 	return configuration, nil
+}
+
+func ValidateRepositoryAlias(alias string) error {
+	if !validName.MatchString(alias) {
+		return invalid("invalid repository alias %q; expected [A-Za-z0-9][A-Za-z0-9._-]*", alias)
+	}
+	if _, reserved := reservedRepositoryAliases[strings.ToLower(alias)]; reserved {
+		return invalid("repository alias %q is a reserved Task Context File name", alias)
+	}
+	return nil
 }
 
 func (configuration Config) validate() error {
@@ -149,13 +163,10 @@ func (configuration Config) validate() error {
 	}
 	repositoriesByFoldedAlias := make(map[string]string, len(configuration.Repositories))
 	for alias, repository := range configuration.Repositories {
-		if !validName.MatchString(alias) {
-			return invalid("invalid repository alias %q; expected [A-Za-z0-9][A-Za-z0-9._-]*", alias)
+		if err := ValidateRepositoryAlias(alias); err != nil {
+			return err
 		}
 		foldedAlias := strings.ToLower(alias)
-		if _, reserved := reservedRepositoryAliases[foldedAlias]; reserved {
-			return invalid("repository alias %q is a reserved Task Context File name", alias)
-		}
 		if existing, duplicate := repositoriesByFoldedAlias[foldedAlias]; duplicate {
 			return invalid("repository aliases %q and %q conflict case-insensitively", existing, alias)
 		}
