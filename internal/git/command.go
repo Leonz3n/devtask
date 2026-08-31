@@ -18,3 +18,16 @@ func Run(directory string, arguments ...string) ([]byte, error) {
 	}
 	return output, nil
 }
+
+func ValidateBranchName(name string) error {
+	command := exec.Command("git", "check-ref-format", "--branch", name)
+	output, err := command.CombinedOutput()
+	if err == nil {
+		return nil
+	}
+	message := strings.TrimSpace(string(output))
+	if message == "" {
+		message = err.Error()
+	}
+	return fmt.Errorf("invalid Task Branch Name %q: %s", name, message)
+}

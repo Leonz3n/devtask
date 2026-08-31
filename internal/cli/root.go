@@ -6,9 +6,11 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"time"
 
 	"github.com/Leonz3n/devtask/internal/config"
 	"github.com/Leonz3n/devtask/internal/repo"
+	"github.com/Leonz3n/devtask/internal/task"
 	"github.com/spf13/cobra"
 )
 
@@ -53,7 +55,81 @@ func NewRootCommand(stdout, stderr io.Writer) *cobra.Command {
 	})
 	root.AddCommand(newInitCommand(stdout))
 	root.AddCommand(newRepoCommand(stdout))
+	root.AddCommand(newTaskCommand(stdout), newTaskListCommand(stdout))
 	return root
+}
+
+func newTaskCommand(stdout io.Writer) *cobra.Command {
+	var branch string
+	command := &cobra.Command{
+		Use:   "new <task>",
+		Short: "Create an empty Task",
+		Args: func(cmd *cobra.Command, args []string) error {
+			if err := cobra.ExactArgs(1)(cmd, args); err != nil {
+				return &validationError{err: err}
+			}
+			return nil
+		},
+		RunE: func(cmd *cobra.Command, args []string) error {
+			paths, err := config.ResolvePaths()
+			if err != nil {
+				return err
+			}
+			configuration, err := config.Load(paths.ConfigFile)
+			if err != nil {
+				return err
+			}
+			var branchOverride *string
+			if cmd.Flags().Changed("branch") {
+				branchOverride = &branch
+			}
+			metadata, err := task.Create(paths, configuration, args[0], branchOverride)
+			if err != nil {
+				return err
+			}
+			_, err = fmt.Fprintf(stdout, "created Task %s with Task Branch Name %s\n", metadata.Name, metadata.TaskBranchName)
+			return err
+		},
+	}
+	command.Flags().StringVar(&branch, "branch", "", "override the Task Branch Name")
+	return command
+}
+
+func newTaskListCommand(stdout io.Writer) *cobra.Command {
+	var asJSON bool
+	command := &cobra.Command{
+		Use:   "list",
+		Short: "List Tasks",
+		Args: func(cmd *cobra.Command, args []string) error {
+			if err := cobra.NoArgs(cmd, args); err != nil {
+				return &validationError{err: err}
+			}
+			return nil
+		},
+		RunE: func(_ *cobra.Command, _ []string) error {
+			paths, err := config.ResolvePaths()
+			if err != nil {
+				return err
+			}
+			tasks, err := task.List(paths)
+			if err != nil {
+				return err
+			}
+			if asJSON {
+				encoder := json.NewEncoder(stdout)
+				encoder.SetEscapeHTML(false)
+				return encoder.Encode(tasks)
+			}
+			for _, listedTask := range tasks {
+				if _, err := fmt.Fprintf(stdout, "%s\t%d\t%s\n", listedTask.Name, listedTask.RepositoryCount, listedTask.CreatedAt.Format(time.RFC3339)); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+	}
+	command.Flags().BoolVar(&asJSON, "json", false, "output JSON")
+	return command
 }
 
 func newRepoCommand(stdout io.Writer) *cobra.Command {
@@ -164,7 +240,7 @@ func ExitCode(err error) int {
 		return 0
 	}
 	var validation *validationError
-	if errors.As(err, &validation) || errors.Is(err, config.ErrInvalid) || errors.Is(err, config.ErrNotInitialized) {
+	if errors.As(err, &validation) || errors.Is(err, config.ErrInvalid) || errors.Is(err, config.ErrNotInitialized) || errors.Is(err, task.ErrInvalid) {
 		return 2
 	}
 	return 1

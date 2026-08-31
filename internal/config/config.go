@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"strings"
 	"text/template"
+	"text/template/parse"
 
 	"gopkg.in/yaml.v3"
 )
@@ -130,6 +131,42 @@ func ValidateRepositoryAlias(alias string) error {
 	return nil
 }
 
+func RenderTaskBranchName(pattern, taskName string) (string, error) {
+	branchTemplate, err := template.New("branch_pattern").Option("missingkey=error").Parse(pattern)
+	if err != nil {
+		return "", invalid("defaults.branch_pattern is invalid: %v", err)
+	}
+	if err := validateBranchTemplate(branchTemplate.Tree.Root); err != nil {
+		return "", err
+	}
+	var rendered strings.Builder
+	if err := branchTemplate.Execute(&rendered, struct{ Task string }{Task: taskName}); err != nil {
+		return "", invalid("defaults.branch_pattern is invalid: %v", err)
+	}
+	if rendered.Len() == 0 {
+		return "", invalid("defaults.branch_pattern must render a non-empty Task Branch Name")
+	}
+	return rendered.String(), nil
+}
+
+func validateBranchTemplate(root *parse.ListNode) error {
+	for _, node := range root.Nodes {
+		switch node := node.(type) {
+		case *parse.TextNode:
+			continue
+		case *parse.ActionNode:
+			pipe := node.Pipe
+			if len(pipe.Decl) == 0 && !pipe.IsAssign && len(pipe.Cmds) == 1 && len(pipe.Cmds[0].Args) == 1 {
+				if field, ok := pipe.Cmds[0].Args[0].(*parse.FieldNode); ok && len(field.Ident) == 1 && field.Ident[0] == "Task" {
+					continue
+				}
+			}
+		}
+		return invalid("defaults.branch_pattern may contain only text and {{.Task}}")
+	}
+	return nil
+}
+
 func (configuration Config) validate() error {
 	if configuration.SchemaVersion != SchemaVersion {
 		return invalid("unsupported schema_version %d; supported version is %d", configuration.SchemaVersion, SchemaVersion)
@@ -140,15 +177,11 @@ func (configuration Config) validate() error {
 	if strings.TrimSpace(configuration.Defaults.BranchPattern) == "" {
 		return invalid("defaults.branch_pattern must not be empty")
 	}
-	branchTemplate, err := template.New("branch_pattern").Option("missingkey=error").Parse(configuration.Defaults.BranchPattern)
+	rendered, err := RenderTaskBranchName(configuration.Defaults.BranchPattern, "example")
 	if err != nil {
-		return invalid("defaults.branch_pattern is invalid: %v", err)
+		return err
 	}
-	var rendered strings.Builder
-	if err := branchTemplate.Execute(&rendered, struct{ Task string }{Task: "example"}); err != nil {
-		return invalid("defaults.branch_pattern is invalid: %v", err)
-	}
-	if strings.TrimSpace(rendered.String()) == "" {
+	if strings.TrimSpace(rendered) == "" {
 		return invalid("defaults.branch_pattern must render a non-empty Task Branch Name")
 	}
 	for name, agent := range map[string]AgentConfig{

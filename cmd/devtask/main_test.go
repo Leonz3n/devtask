@@ -13,11 +13,31 @@ import (
 	"time"
 
 	"golang.org/x/sys/unix"
+	"gopkg.in/yaml.v3"
 )
 
 type listedRepository struct {
 	Alias string `json:"alias"`
 	Path  string `json:"path"`
+}
+
+type listedTask struct {
+	Name            string    `json:"name"`
+	RepositoryCount int       `json:"repository_count"`
+	CreatedAt       time.Time `json:"created_at"`
+}
+
+type persistedTask struct {
+	SchemaVersion  int       `yaml:"schema_version"`
+	Name           string    `yaml:"name"`
+	TaskBranchName string    `yaml:"task_branch_name"`
+	CreatedAt      time.Time `yaml:"created_at"`
+	State          string    `yaml:"state"`
+	ContextFiles   []struct {
+		Path   string `yaml:"path"`
+		SHA256 string `yaml:"sha256"`
+	} `yaml:"context_files"`
+	Attachments []any `yaml:"attachments"`
 }
 
 func devtaskBinary(t *testing.T) string {
@@ -704,6 +724,307 @@ func TestRepoAddDetectsConcurrentExternalConfigurationEdit(t *testing.T) {
 	}
 }
 
+func TestNewCreatesAndListsEmptyTask(t *testing.T) {
+	environment := initializedCLIEnvironment(t)
+
+	created := environment.run(t, "new", "billing-rollout")
+
+	if created.code != 0 {
+		t.Fatalf("new failed: %s", created.stderr)
+	}
+	if created.stderr != "" {
+		t.Fatalf("new stderr = %q, want empty", created.stderr)
+	}
+	if !strings.Contains(created.stdout, "billing-rollout") || !strings.Contains(created.stdout, "feat/billing-rollout") {
+		t.Fatalf("new output does not identify Task and Task Branch Name:\n%s", created.stdout)
+	}
+
+	metadataPath := filepath.Join(environment.dataHome, "devtask", "tasks", "billing-rollout.yaml")
+	assertFileMode(t, metadataPath, 0o600)
+	contents, err := os.ReadFile(metadataPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var metadata persistedTask
+	if err := yaml.Unmarshal(contents, &metadata); err != nil {
+		t.Fatalf("decode Task metadata: %v\n%s", err, contents)
+	}
+	if metadata.SchemaVersion != 1 || metadata.Name != "billing-rollout" || metadata.TaskBranchName != "feat/billing-rollout" || metadata.State != "ready" {
+		t.Fatalf("Task metadata = %#v", metadata)
+	}
+	if metadata.CreatedAt.IsZero() || metadata.CreatedAt.Location() != time.UTC {
+		t.Fatalf("created_at = %v, want UTC timestamp", metadata.CreatedAt)
+	}
+	if metadata.Attachments == nil || len(metadata.Attachments) != 0 {
+		t.Fatalf("attachments = %#v, want an explicit empty sequence", metadata.Attachments)
+	}
+	if len(metadata.ContextFiles) != 2 || metadata.ContextFiles[0].Path != "TASK.md" || metadata.ContextFiles[1].Path != "AGENTS.md" {
+		t.Fatalf("context_files = %#v, want TASK.md and AGENTS.md ownership data", metadata.ContextFiles)
+	}
+	for _, contextFile := range metadata.ContextFiles {
+		if len(contextFile.SHA256) != 64 {
+			t.Fatalf("digest for %s = %q, want SHA-256", contextFile.Path, contextFile.SHA256)
+		}
+	}
+
+	workspace := filepath.Join(environment.dataHome, "devtask", "workspaces", "billing-rollout")
+	assertDirectoryMode(t, workspace, 0o700)
+	for _, name := range []string{"TASK.md", "AGENTS.md"} {
+		assertFileMode(t, filepath.Join(workspace, name), 0o600)
+	}
+	taskDocument, err := os.ReadFile(filepath.Join(workspace, "TASK.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(taskDocument), "billing-rollout") {
+		t.Fatalf("TASK.md does not identify the Task:\n%s", taskDocument)
+	}
+	agentsDocument, err := os.ReadFile(filepath.Join(workspace, "AGENTS.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, marker := range []string{"<!-- devtask:generated:start -->", "<!-- devtask:generated:end -->"} {
+		if !strings.Contains(string(agentsDocument), marker) {
+			t.Fatalf("AGENTS.md does not contain %q:\n%s", marker, agentsDocument)
+		}
+	}
+
+	human := environment.run(t, "list")
+	if human.code != 0 || !strings.Contains(human.stdout, "billing-rollout") || !strings.Contains(human.stdout, "0") || !strings.Contains(human.stdout, metadata.CreatedAt.Format(time.RFC3339)) {
+		t.Fatalf("human list did not report the empty Task: code=%d stderr=%q stdout=%q", human.code, human.stderr, human.stdout)
+	}
+	machine := environment.run(t, "list", "--json")
+	if machine.code != 0 {
+		t.Fatalf("list --json failed: %s", machine.stderr)
+	}
+	var tasks []listedTask
+	if err := json.Unmarshal([]byte(machine.stdout), &tasks); err != nil {
+		t.Fatalf("decode Task list JSON: %v\n%s", err, machine.stdout)
+	}
+	if len(tasks) != 1 || tasks[0].Name != "billing-rollout" || tasks[0].RepositoryCount != 0 || !tasks[0].CreatedAt.Equal(metadata.CreatedAt) {
+		t.Fatalf("Task list = %#v, want billing-rollout with zero repositories", tasks)
+	}
+}
+
+func TestNewFreezesBranchOverrideAndRejectsCaseInsensitiveDuplicate(t *testing.T) {
+	environment := initializedCLIEnvironment(t)
+	created := environment.run(t, "new", "Billing", "--branch", "release/billing-v2")
+	if created.code != 0 {
+		t.Fatalf("new --branch failed: %s", created.stderr)
+	}
+
+	metadata := readPersistedTask(t, environment, "Billing")
+	if metadata.TaskBranchName != "release/billing-v2" {
+		t.Fatalf("Task Branch Name = %q, want override", metadata.TaskBranchName)
+	}
+	taskDocumentPath := filepath.Join(environment.dataHome, "devtask", "workspaces", "Billing", "TASK.md")
+	userContents := []byte("# User-edited Task context\n")
+	if err := os.WriteFile(taskDocumentPath, userContents, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	duplicate := environment.run(t, "new", "billing")
+
+	if duplicate.code != 2 {
+		t.Fatalf("duplicate exit code = %d, want 2; stderr: %s", duplicate.code, duplicate.stderr)
+	}
+	if !strings.Contains(duplicate.stderr, "Task \"Billing\" already exists") {
+		t.Fatalf("duplicate stderr = %q, want case-insensitive conflict", duplicate.stderr)
+	}
+	stillEdited, err := os.ReadFile(taskDocumentPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(stillEdited, userContents) {
+		t.Fatalf("duplicate new rewrote TASK.md:\n%s", stillEdited)
+	}
+	if listed := listTasks(t, environment); len(listed) != 1 || listed[0].Name != "Billing" {
+		t.Fatalf("Tasks after duplicate = %#v, want only Billing", listed)
+	}
+}
+
+func TestNewRejectsInvalidNamesTemplatesAndBranchNamesWithoutCreatingState(t *testing.T) {
+	tests := []struct {
+		name          string
+		configuration string
+		arguments     []string
+		message       string
+	}{
+		{name: "space in Task name", arguments: []string{"new", "bad name"}, message: "invalid Task name"},
+		{name: "dot Task name", arguments: []string{"new", "."}, message: "invalid Task name"},
+		{name: "leading dash Task name", arguments: []string{"new", "--", "-leading"}, message: "invalid Task name"},
+		{
+			name:          "template builtin",
+			configuration: "schema_version: 1\ndefaults:\n  branch_pattern: 'feat/{{printf \"%s\" .Task}}'\n",
+			arguments:     []string{"new", "billing"},
+			message:       "only text and {{.Task}}",
+		},
+		{
+			name:          "unknown template value",
+			configuration: "schema_version: 1\ndefaults:\n  branch_pattern: 'feat/{{.Repository}}'\n",
+			arguments:     []string{"new", "billing"},
+			message:       "branch_pattern",
+		},
+		{
+			name:          "invalid rendered Task Branch Name",
+			configuration: "schema_version: 1\ndefaults:\n  branch_pattern: 'feat/{{.Task}}..lock'\n",
+			arguments:     []string{"new", "billing"},
+			message:       "invalid Task Branch Name",
+		},
+		{name: "invalid branch override", arguments: []string{"new", "billing", "--branch", "bad branch"}, message: "invalid Task Branch Name"},
+		{name: "empty branch override", arguments: []string{"new", "billing", "--branch", ""}, message: "invalid Task Branch Name"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			environment := initializedCLIEnvironment(t)
+			if test.configuration != "" {
+				configPath := filepath.Join(environment.configHome, "devtask", "config.yaml")
+				if err := os.WriteFile(configPath, []byte(test.configuration), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			result := environment.run(t, test.arguments...)
+
+			if result.code != 2 {
+				t.Fatalf("exit code = %d, want 2; stderr: %s", result.code, result.stderr)
+			}
+			if !strings.Contains(result.stderr, test.message) {
+				t.Fatalf("stderr = %q, want it to contain %q", result.stderr, test.message)
+			}
+			if entries, err := os.ReadDir(filepath.Join(environment.dataHome, "devtask", "tasks")); err != nil {
+				t.Fatal(err)
+			} else {
+				for _, entry := range entries {
+					if filepath.Ext(entry.Name()) == ".yaml" {
+						t.Fatalf("invalid new created Task metadata %q", entry.Name())
+					}
+				}
+			}
+			if entries, err := os.ReadDir(filepath.Join(environment.dataHome, "devtask", "workspaces")); err != nil {
+				t.Fatal(err)
+			} else if len(entries) != 0 {
+				t.Fatalf("invalid new created workspace entries: %#v", entries)
+			}
+		})
+	}
+}
+
+func TestNewRejectsFilesystemCollisionsWithoutOverwritingThem(t *testing.T) {
+	t.Run("Task metadata", func(t *testing.T) {
+		environment := initializedCLIEnvironment(t)
+		path := filepath.Join(environment.dataHome, "devtask", "tasks", "billing.yaml")
+		userContents := []byte("user-owned metadata collision\n")
+		if err := os.WriteFile(path, userContents, 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		result := environment.run(t, "new", "billing")
+
+		if result.code != 2 || !strings.Contains(result.stderr, "already exists") {
+			t.Fatalf("new collision result: code=%d stderr=%q", result.code, result.stderr)
+		}
+		contents, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(contents, userContents) {
+			t.Fatalf("metadata collision was overwritten:\n%s", contents)
+		}
+		if _, err := os.Stat(filepath.Join(environment.dataHome, "devtask", "workspaces", "billing")); !os.IsNotExist(err) {
+			t.Fatal("metadata collision created a Task Workspace")
+		}
+	})
+
+	t.Run("case-insensitive Task Workspace", func(t *testing.T) {
+		environment := initializedCLIEnvironment(t)
+		workspace := filepath.Join(environment.dataHome, "devtask", "workspaces", "Billing")
+		if err := os.Mkdir(workspace, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		sentinel := filepath.Join(workspace, "user.txt")
+		if err := os.WriteFile(sentinel, []byte("preserve me\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		result := environment.run(t, "new", "billing")
+
+		if result.code != 2 || !strings.Contains(result.stderr, "Task Workspace collision") {
+			t.Fatalf("new collision result: code=%d stderr=%q", result.code, result.stderr)
+		}
+		if contents, err := os.ReadFile(sentinel); err != nil || string(contents) != "preserve me\n" {
+			t.Fatalf("workspace collision changed sentinel: contents=%q error=%v", contents, err)
+		}
+		if _, err := os.Stat(filepath.Join(environment.dataHome, "devtask", "tasks", "billing.yaml")); !os.IsNotExist(err) {
+			t.Fatal("workspace collision created Task metadata")
+		}
+	})
+}
+
+func TestNewRollsBackWorkspaceWhenMetadataCannotBeWritten(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("devtask v1 supports macOS and Linux")
+	}
+	environment := initializedCLIEnvironment(t)
+	tasksDirectory := filepath.Join(environment.dataHome, "devtask", "tasks")
+	lockPath := filepath.Join(tasksDirectory, ".billing.lock")
+	if err := os.WriteFile(lockPath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(tasksDirectory, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(tasksDirectory, 0o700) })
+
+	result := environment.run(t, "new", "billing")
+
+	if result.code != 1 {
+		t.Fatalf("exit code = %d, want 1; stderr: %s", result.code, result.stderr)
+	}
+	if !strings.Contains(result.stderr, "write Task metadata") {
+		t.Fatalf("stderr = %q, want metadata failure", result.stderr)
+	}
+	if _, err := os.Stat(filepath.Join(tasksDirectory, "billing.yaml")); !os.IsNotExist(err) {
+		t.Fatal("failed new left Task metadata")
+	}
+	workspaceRoot := filepath.Join(environment.dataHome, "devtask", "workspaces")
+	if entries, err := os.ReadDir(workspaceRoot); err != nil {
+		t.Fatal(err)
+	} else if len(entries) != 0 {
+		t.Fatalf("failed new left Task Workspace state: %#v", entries)
+	}
+}
+
+func TestNewFailsImmediatelyWhenTaskLockIsBusy(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("devtask v1 supports macOS and Linux")
+	}
+	environment := initializedCLIEnvironment(t)
+	lockPath := filepath.Join(environment.dataHome, "devtask", "tasks", ".billing.lock")
+	held, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = held.Close() })
+	if err := unix.Flock(int(held.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
+		t.Fatalf("hold Task lock: %v", err)
+	}
+
+	busy := environment.run(t, "new", "billing")
+
+	if busy.code != 1 || !strings.Contains(busy.stderr, "Task \"billing\" is busy") {
+		t.Fatalf("busy new result: code=%d stderr=%q", busy.code, busy.stderr)
+	}
+	if err := unix.Flock(int(held.Fd()), unix.LOCK_UN); err != nil {
+		t.Fatalf("release Task lock: %v", err)
+	}
+	created := environment.run(t, "new", "billing")
+	if created.code != 0 {
+		t.Fatalf("new after releasing lock failed: %s", created.stderr)
+	}
+}
+
 func initializedCLIEnvironment(t *testing.T) cliTestEnvironment {
 	t.Helper()
 	environment := newCLITestEnvironment(t)
@@ -725,6 +1046,33 @@ func listRepositories(t *testing.T, environment cliTestEnvironment) []listedRepo
 		t.Fatalf("decode repo list JSON: %v\n%s", err, result.stdout)
 	}
 	return repositories
+}
+
+func listTasks(t *testing.T, environment cliTestEnvironment) []listedTask {
+	t.Helper()
+	result := environment.run(t, "list", "--json")
+	if result.code != 0 {
+		t.Fatalf("list --json failed: %s", result.stderr)
+	}
+	var tasks []listedTask
+	if err := json.Unmarshal([]byte(result.stdout), &tasks); err != nil {
+		t.Fatalf("decode Task list JSON: %v\n%s", err, result.stdout)
+	}
+	return tasks
+}
+
+func readPersistedTask(t *testing.T, environment cliTestEnvironment, name string) persistedTask {
+	t.Helper()
+	path := filepath.Join(environment.dataHome, "devtask", "tasks", name+".yaml")
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var metadata persistedTask
+	if err := yaml.Unmarshal(contents, &metadata); err != nil {
+		t.Fatalf("decode Task metadata: %v\n%s", err, contents)
+	}
+	return metadata
 }
 
 func gitRun(t *testing.T, arguments ...string) string {
