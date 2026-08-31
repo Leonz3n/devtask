@@ -193,6 +193,9 @@ func (configuration Config) validate() error {
 		if strings.ContainsRune(agent.Command, '\x00') || strings.ContainsAny(agent.Command, "\r\n") {
 			return invalid("agents.%s.command must be one executable name or path", name)
 		}
+		if !filepath.IsAbs(agent.Command) && filepath.Base(agent.Command) != agent.Command {
+			return invalid("agents.%s.command must be one executable name or absolute path", name)
+		}
 	}
 	repositoriesByFoldedAlias := make(map[string]string, len(configuration.Repositories))
 	for alias, repository := range configuration.Repositories {

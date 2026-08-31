@@ -61,17 +61,17 @@ func NewRootCommand(stdout, stderr io.Writer) *cobra.Command {
 	root.AddCommand(newRepoCommand(stdout))
 	root.AddCommand(newTaskCommand(stdout), newTaskListCommand(stdout), newTaskAddCommand(stdout, stderr), newTaskStatusCommand(stdout))
 	root.AddCommand(
-		newAgentCommand(launcher.Pi, os.Stdin, stdout, stderr),
-		newAgentCommand(launcher.Claude, os.Stdin, stdout, stderr),
-		newAgentCommand(launcher.Codex, os.Stdin, stdout, stderr),
+		newAgentLauncherCommand(launcher.Pi, os.Stdin, stdout, stderr),
+		newAgentLauncherCommand(launcher.Claude, os.Stdin, stdout, stderr),
+		newAgentLauncherCommand(launcher.Codex, os.Stdin, stdout, stderr),
 	)
 	return root
 }
 
-func newAgentCommand(agent launcher.Agent, stdin io.Reader, stdout, stderr io.Writer) *cobra.Command {
+func newAgentLauncherCommand(agentLauncher launcher.AgentLauncher, stdin io.Reader, stdout, stderr io.Writer) *cobra.Command {
 	command := &cobra.Command{
-		Use:   string(agent) + " <task> [-- <args>...]",
-		Short: "Launch " + string(agent) + " for a Task",
+		Use:   string(agentLauncher) + " <task> [-- <args>...]",
+		Short: "Launch " + string(agentLauncher) + " for a Task",
 		Args:  launcherArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
 			paths, err := config.ResolvePaths()
@@ -82,7 +82,7 @@ func newAgentCommand(agent launcher.Agent, stdin io.Reader, stdout, stderr io.Wr
 			if err != nil {
 				return err
 			}
-			return launcher.Launch(paths, configuration, agent, args[0], args[1:], launcher.Streams{Stdin: stdin, Stdout: stdout, Stderr: stderr})
+			return launcher.Launch(paths, configuration, agentLauncher, args[0], args[1:], runner.Streams{Stdin: stdin, Stdout: stdout, Stderr: stderr})
 		},
 	}
 	return command
@@ -93,10 +93,10 @@ func launcherArgs(cmd *cobra.Command, args []string) error {
 		return &validationError{err: errors.New("requires a Task name")}
 	}
 	if dash := cmd.ArgsLenAtDash(); dash >= 0 && dash != 1 {
-		return &validationError{err: errors.New("agent arguments must follow exactly one Task name and --")}
+		return &validationError{err: errors.New("Agent Launcher arguments must follow exactly one Task name and --")}
 	}
 	if cmd.ArgsLenAtDash() < 0 && len(args) != 1 {
-		return &validationError{err: errors.New("agent arguments must follow --")}
+		return &validationError{err: errors.New("Agent Launcher arguments must follow --")}
 	}
 	return nil
 }

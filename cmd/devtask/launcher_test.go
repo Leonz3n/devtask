@@ -19,8 +19,8 @@ func TestPiLauncherUsesEmptyTaskWorkspaceAndPreservesProcessContract(t *testing.
 	if result := environment.run(t, "new", "billing"); result.code != 0 {
 		t.Fatalf("new failed: %s", result.stderr)
 	}
-	fake := writeFakeAgent(t)
-	configureAgentCommand(t, environment, "pi", fake)
+	fake := writeFakeLauncherExecutable(t)
+	configureLauncherCommand(t, environment, "pi", fake)
 
 	result := environment.runWithInput(t, "input from terminal\n", "pi", "billing", "--", "--model", "model with spaces", "$HOME")
 
@@ -46,8 +46,8 @@ func TestPiLauncherUsesEmptyTaskWorkspaceAndPreservesProcessContract(t *testing.
 
 func TestClaudeLauncherUsesFirstTaskWorktreeAndAddsRemainingTaskDirectories(t *testing.T) {
 	environment, worktrees := taskWithTwoAttachments(t)
-	fake := writeFakeAgent(t)
-	configureAgentCommand(t, environment, "claude", fake)
+	fake := writeFakeLauncherExecutable(t)
+	configureLauncherCommand(t, environment, "claude", fake)
 
 	result := environment.runWithInput(t, "hello\n", "claude", "billing", "--", "--add-dir=/user/extra", "review this")
 
@@ -67,8 +67,8 @@ func TestClaudeLauncherUsesFirstTaskWorktreeAndAddsRemainingTaskDirectories(t *t
 
 func TestCodexLauncherUsesRecordedFirstTaskWorktreeAndAddsRemainingTaskDirectories(t *testing.T) {
 	environment, worktrees := taskWithTwoAttachments(t)
-	fake := writeFakeAgent(t)
-	configureAgentCommand(t, environment, "codex", fake)
+	fake := writeFakeLauncherExecutable(t)
+	configureLauncherCommand(t, environment, "codex", fake)
 
 	result := environment.runWithInput(t, "hello\n", "codex", "billing", "--", "--add-dir", "/user/extra", "review this")
 
@@ -92,16 +92,16 @@ func TestCodexLauncherUsesRecordedFirstTaskWorktreeAndAddsRemainingTaskDirectori
 }
 
 func TestClaudeAndCodexLaunchEmptyTaskFromTaskWorkspaceWithoutInjectedDirectories(t *testing.T) {
-	for _, agent := range []string{"claude", "codex"} {
-		t.Run(agent, func(t *testing.T) {
+	for _, launcherName := range []string{"claude", "codex"} {
+		t.Run(launcherName, func(t *testing.T) {
 			environment := initializedCLIEnvironment(t)
 			if result := environment.run(t, "new", "billing"); result.code != 0 {
 				t.Fatalf("new failed: %s", result.stderr)
 			}
-			fake := writeFakeAgent(t)
-			configureAgentCommand(t, environment, agent, fake)
+			fake := writeFakeLauncherExecutable(t)
+			configureLauncherCommand(t, environment, launcherName, fake)
 
-			result := environment.runWithInput(t, "hello\n", agent, "billing", "--", "prompt")
+			result := environment.runWithInput(t, "hello\n", launcherName, "billing", "--", "prompt")
 
 			workspace := filepath.Join(environment.dataHome, "devtask", "workspaces", "billing")
 			if result.code != 23 {
@@ -117,17 +117,17 @@ func TestClaudeAndCodexLaunchEmptyTaskFromTaskWorkspaceWithoutInjectedDirectorie
 
 func TestAgentLaunchersRejectArgumentsThatTakeOverManagedTaskWorktrees(t *testing.T) {
 	tests := []struct {
-		name  string
-		agent string
-		args  []string
+		name         string
+		launcherName string
+		args         []string
 	}{
-		{name: "Claude worktree flag", agent: "claude", args: []string{"--worktree", "other"}},
-		{name: "Claude worktree equals flag", agent: "claude", args: []string{"--worktree=other"}},
-		{name: "Claude short worktree flag", agent: "claude", args: []string{"-w", "other"}},
-		{name: "Claude compact short worktree flag", agent: "claude", args: []string{"-wother"}},
-		{name: "Codex working root flag", agent: "codex", args: []string{"-C", "/tmp/other"}},
-		{name: "Codex compact working root flag", agent: "codex", args: []string{"-C/tmp/other"}},
-		{name: "Codex long working root flag", agent: "codex", args: []string{"--cd=/tmp/other"}},
+		{name: "Claude worktree flag", launcherName: "claude", args: []string{"--worktree", "other"}},
+		{name: "Claude worktree equals flag", launcherName: "claude", args: []string{"--worktree=other"}},
+		{name: "Claude short worktree flag", launcherName: "claude", args: []string{"-w", "other"}},
+		{name: "Claude short worktree equals flag", launcherName: "claude", args: []string{"-w=other"}},
+		{name: "Codex working root flag", launcherName: "codex", args: []string{"-C", "/tmp/other"}},
+		{name: "Codex compact working root flag", launcherName: "codex", args: []string{"-C/tmp/other"}},
+		{name: "Codex long working root flag", launcherName: "codex", args: []string{"--cd=/tmp/other"}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -135,9 +135,9 @@ func TestAgentLaunchersRejectArgumentsThatTakeOverManagedTaskWorktrees(t *testin
 			if result := environment.run(t, "new", "billing"); result.code != 0 {
 				t.Fatalf("new failed: %s", result.stderr)
 			}
-			configureAgentCommand(t, environment, test.agent, writeFakeAgent(t))
+			configureLauncherCommand(t, environment, test.launcherName, writeFakeLauncherExecutable(t))
 
-			arguments := append([]string{test.agent, "billing", "--"}, test.args...)
+			arguments := append([]string{test.launcherName, "billing", "--"}, test.args...)
 			result := environment.run(t, arguments...)
 
 			if result.code != 2 {
@@ -150,9 +150,61 @@ func TestAgentLaunchersRejectArgumentsThatTakeOverManagedTaskWorktrees(t *testin
 	}
 }
 
+func TestAgentLaunchersPreserveLiteralArgumentsAfterChildEndOfOptions(t *testing.T) {
+	tests := []struct {
+		launcherName string
+		literal      string
+	}{
+		{launcherName: "claude", literal: "-write-this-prompt"},
+		{launcherName: "codex", literal: "-C-is-prompt-text"},
+	}
+	for _, test := range tests {
+		t.Run(test.launcherName, func(t *testing.T) {
+			environment := initializedCLIEnvironment(t)
+			if result := environment.run(t, "new", "billing"); result.code != 0 {
+				t.Fatalf("new failed: %s", result.stderr)
+			}
+			configureLauncherCommand(t, environment, test.launcherName, writeFakeLauncherExecutable(t))
+
+			result := environment.run(t, test.launcherName, "billing", "--", "--", test.literal)
+
+			if result.code != 0 {
+				t.Fatalf("literal child argument rejected: code=%d stderr=%q", result.code, result.stderr)
+			}
+			assertOutputLines(t, result.stdout, []string{"arg[0]=--", "arg[1]=" + test.literal})
+		})
+	}
+}
+
+func TestAgentLaunchersPreserveNonConflictingSimilarOptions(t *testing.T) {
+	tests := []struct {
+		launcherName string
+		argument     string
+	}{
+		{launcherName: "claude", argument: "-write-this-prompt"},
+		{launcherName: "codex", argument: "--config=/user/settings.toml"},
+	}
+	for _, test := range tests {
+		t.Run(test.launcherName, func(t *testing.T) {
+			environment := initializedCLIEnvironment(t)
+			if result := environment.run(t, "new", "billing"); result.code != 0 {
+				t.Fatalf("new failed: %s", result.stderr)
+			}
+			configureLauncherCommand(t, environment, test.launcherName, writeFakeLauncherExecutable(t))
+
+			result := environment.run(t, test.launcherName, "billing", "--", test.argument)
+
+			if result.code != 0 {
+				t.Fatalf("non-conflicting option rejected: code=%d stderr=%q", result.code, result.stderr)
+			}
+			assertOutputLines(t, result.stdout, []string{"arg[0]=" + test.argument})
+		})
+	}
+}
+
 func TestAgentLauncherHoldsSharedTaskAndRepositoryLocksForChildLifetime(t *testing.T) {
 	environment, _ := taskWithTwoAttachments(t)
-	configureAgentCommand(t, environment, "pi", writeFakeAgent(t))
+	configureLauncherCommand(t, environment, "pi", writeFakeLauncherExecutable(t))
 	binary := devtaskBinary(t)
 
 	command := exec.Command(binary, "pi", "billing")
@@ -175,7 +227,7 @@ func TestAgentLauncherHoldsSharedTaskAndRepositoryLocksForChildLifetime(t *testi
 	for {
 		line, err := reader.ReadString('\n')
 		if err != nil {
-			t.Fatalf("wait for fake agent readiness: %v; stderr: %s", err, stderr.String())
+			t.Fatalf("wait for fake Agent Launcher readiness: %v; stderr: %s", err, stderr.String())
 		}
 		if line == "ready\n" {
 			break
@@ -211,7 +263,7 @@ func TestAgentLauncherForwardsTerminationSignalToChild(t *testing.T) {
 	if result := environment.run(t, "new", "billing"); result.code != 0 {
 		t.Fatalf("new failed: %s", result.stderr)
 	}
-	configureAgentCommand(t, environment, "pi", writeSignalAgent(t))
+	configureLauncherCommand(t, environment, "pi", writeSignalLauncherExecutable(t))
 	command := exec.Command(devtaskBinary(t), "pi", "billing")
 	command.Dir = environment.home
 	command.Env = launcherEnvironment(environment)
@@ -226,7 +278,7 @@ func TestAgentLauncherForwardsTerminationSignalToChild(t *testing.T) {
 	}
 	line, err := bufio.NewReader(stdout).ReadString('\n')
 	if err != nil || line != "ready\n" {
-		t.Fatalf("wait for fake agent readiness: line=%q err=%v stderr=%s", line, err, stderr.String())
+		t.Fatalf("wait for fake Agent Launcher readiness: line=%q err=%v stderr=%s", line, err, stderr.String())
 	}
 	if err := command.Process.Signal(syscall.SIGTERM); err != nil {
 		t.Fatal(err)
@@ -246,12 +298,12 @@ func TestAgentLauncherResolvesConfiguredExecutableNameFromPath(t *testing.T) {
 	if result := environment.run(t, "new", "billing"); result.code != 0 {
 		t.Fatalf("new failed: %s", result.stderr)
 	}
-	fake := writeFakeAgent(t)
+	fake := writeFakeLauncherExecutable(t)
 	named := filepath.Join(filepath.Dir(fake), "custom-pi")
 	if err := os.Rename(fake, named); err != nil {
 		t.Fatal(err)
 	}
-	configureAgentCommand(t, environment, "pi", filepath.Base(named))
+	configureLauncherCommand(t, environment, "pi", filepath.Base(named))
 
 	result := environment.runWithInputAndEnvironment(t, "hello\n", []string{"PATH=" + filepath.Dir(named) + string(os.PathListSeparator) + os.Getenv("PATH")}, "pi", "billing")
 
@@ -266,15 +318,33 @@ func TestAgentLauncherDoesNotInterpretConfiguredCommandAsShell(t *testing.T) {
 		t.Fatalf("new failed: %s", result.stderr)
 	}
 	marker := filepath.Join(t.TempDir(), "shell-was-used")
-	configureAgentCommand(t, environment, "pi", writeFakeAgent(t)+"; touch "+marker)
+	configureLauncherCommand(t, environment, "pi", writeFakeLauncherExecutable(t)+"; touch "+marker)
 
 	result := environment.run(t, "pi", "billing")
 
-	if result.code != 1 || !strings.Contains(result.stderr, "resolve agent executable") {
+	if result.code != 1 || !strings.Contains(result.stderr, "resolve Agent Launcher executable") {
 		t.Fatalf("shell-like command did not fail as one executable name: code=%d stderr=%q", result.code, result.stderr)
 	}
 	if _, err := os.Stat(marker); !os.IsNotExist(err) {
 		t.Fatalf("configured command was interpreted by a shell; marker stat: %v", err)
+	}
+}
+
+func TestAgentLauncherRejectsConfiguredRelativeExecutablePath(t *testing.T) {
+	environment := initializedCLIEnvironment(t)
+	if result := environment.run(t, "new", "billing"); result.code != 0 {
+		t.Fatalf("new failed: %s", result.stderr)
+	}
+	fake := writeFakeLauncherExecutable(t)
+	if err := os.Rename(fake, filepath.Join(environment.home, "fake-agent")); err != nil {
+		t.Fatal(err)
+	}
+	configureLauncherCommand(t, environment, "pi", "./fake-agent")
+
+	result := environment.run(t, "pi", "billing")
+
+	if result.code != 2 || !strings.Contains(result.stderr, "one executable name or absolute path") {
+		t.Fatalf("relative executable path was not rejected as configuration: code=%d stderr=%q", result.code, result.stderr)
 	}
 }
 
@@ -344,9 +414,9 @@ func (environment cliTestEnvironment) runWithInputAndEnvironment(t *testing.T, i
 	return commandResult{stdout: stdout.String(), stderr: stderr.String(), code: code}
 }
 
-func writeFakeAgent(t *testing.T) string {
+func writeFakeLauncherExecutable(t *testing.T) string {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "fake agent")
+	path := filepath.Join(t.TempDir(), "fake Agent Launcher")
 	script := `#!/bin/sh
 printf 'cwd=%s\n' "$PWD"
 index=0
@@ -366,7 +436,7 @@ exit "${FAKE_AGENT_EXIT:-0}"
 	return path
 }
 
-func writeSignalAgent(t *testing.T) string {
+func writeSignalLauncherExecutable(t *testing.T) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "signal-agent")
 	script := `#!/bin/sh
@@ -391,14 +461,14 @@ func launcherEnvironment(environment cliTestEnvironment, extra ...string) []stri
 	return append(values, extra...)
 }
 
-func configureAgentCommand(t *testing.T, environment cliTestEnvironment, agent, command string) {
+func configureLauncherCommand(t *testing.T, environment cliTestEnvironment, launcherName, command string) {
 	t.Helper()
 	path := filepath.Join(environment.configHome, "devtask", "config.yaml")
 	configuration, err := config.Load(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	switch agent {
+	switch launcherName {
 	case "pi":
 		configuration.Agents.Pi.Command = command
 	case "claude":
@@ -406,7 +476,7 @@ func configureAgentCommand(t *testing.T, environment cliTestEnvironment, agent, 
 	case "codex":
 		configuration.Agents.Codex.Command = command
 	default:
-		t.Fatalf("unknown agent %q", agent)
+		t.Fatalf("unknown Agent Launcher %q", launcherName)
 	}
 	updated, err := yaml.Marshal(configuration)
 	if err != nil {

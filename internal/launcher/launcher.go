@@ -3,7 +3,6 @@ package launcher
 import (
 	"errors"
 	"fmt"
-	"io"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -15,18 +14,12 @@ import (
 	"github.com/Leonz3n/devtask/internal/task"
 )
 
-type Streams struct {
-	Stdin  io.Reader
-	Stdout io.Writer
-	Stderr io.Writer
-}
-
-type Agent string
+type AgentLauncher string
 
 const (
-	Pi     Agent = "pi"
-	Claude Agent = "claude"
-	Codex  Agent = "codex"
+	Pi     AgentLauncher = "pi"
+	Claude AgentLauncher = "claude"
+	Codex  AgentLauncher = "codex"
 )
 
 var ErrInvalid = errors.New("invalid Agent Launcher request")
@@ -36,11 +29,11 @@ type repositoryLockTarget struct {
 	alias string
 }
 
-func Launch(paths config.Paths, configuration config.Config, agent Agent, taskName string, arguments []string, streams Streams) error {
+func Launch(paths config.Paths, configuration config.Config, agentLauncher AgentLauncher, taskName string, arguments []string, streams runner.Streams) error {
 	if err := task.ValidateName(taskName); err != nil {
 		return err
 	}
-	if err := validateArguments(agent, arguments); err != nil {
+	if err := validateForwardedArguments(agentLauncher, arguments); err != nil {
 		return err
 	}
 	taskLock, err := lock.AcquireShared(task.LockPath(paths, taskName))
@@ -57,7 +50,7 @@ func Launch(paths config.Paths, configuration config.Config, agent Agent, taskNa
 		return err
 	}
 	if metadata.State != task.StateReady {
-		return fmt.Errorf("%w: Task %q is incomplete; run status and follow recovery guidance before launching an agent", task.ErrInvalid, metadata.Name)
+		return fmt.Errorf("%w: Task %q is incomplete; run status and follow recovery guidance before using an Agent Launcher", task.ErrInvalid, metadata.Name)
 	}
 
 	targetsByPath := make(map[string]repositoryLockTarget, len(metadata.Attachments))
@@ -93,25 +86,27 @@ func Launch(paths config.Paths, configuration config.Config, agent Agent, taskNa
 	}
 
 	workspacePath := filepath.Join(paths.Workspaces, metadata.Name)
-	directory, launcherArguments, executable := arrange(agent, configuration, metadata, workspacePath, arguments)
-	return runner.Run(executable, directory, launcherArguments, runner.Streams(streams))
+	invocation := buildInvocation(agentLauncher, configuration, metadata, workspacePath, arguments)
+	return runner.Run(invocation, streams)
 }
 
-func arrange(agent Agent, configuration config.Config, metadata task.Metadata, workspacePath string, arguments []string) (string, []string, string) {
+func buildInvocation(agentLauncher AgentLauncher, configuration config.Config, metadata task.Metadata, workspacePath string, arguments []string) runner.Invocation {
 	attachments := append([]task.RepositoryAttachment(nil), metadata.Attachments...)
 	sort.SliceStable(attachments, func(i, j int) bool { return attachments[i].Order < attachments[j].Order })
-	if len(attachments) == 0 {
-		switch agent {
-		case Claude:
-			return workspacePath, arguments, configuration.Agents.Claude.Command
-		case Codex:
-			return workspacePath, arguments, configuration.Agents.Codex.Command
-		default:
-			return workspacePath, arguments, configuration.Agents.Pi.Command
-		}
+	invocation := runner.Invocation{Directory: workspacePath, Arguments: arguments}
+	switch agentLauncher {
+	case Claude:
+		invocation.Executable = configuration.Agents.Claude.Command
+	case Codex:
+		invocation.Executable = configuration.Agents.Codex.Command
+	default:
+		invocation.Executable = configuration.Agents.Pi.Command
+	}
+	if len(attachments) == 0 || agentLauncher == Pi {
+		return invocation
 	}
 
-	switch agent {
+	switch agentLauncher {
 	case Claude:
 		launcherArguments := make([]string, 0, len(arguments)+len(attachments))
 		for _, attachment := range attachments[1:] {
@@ -119,7 +114,8 @@ func arrange(agent Agent, configuration config.Config, metadata task.Metadata, w
 		}
 		launcherArguments = append(launcherArguments, "--add-dir="+workspacePath)
 		launcherArguments = append(launcherArguments, arguments...)
-		return attachments[0].WorktreePath, launcherArguments, configuration.Agents.Claude.Command
+		invocation.Directory = attachments[0].WorktreePath
+		invocation.Arguments = launcherArguments
 	case Codex:
 		launcherArguments := []string{"-C", attachments[0].WorktreePath}
 		for _, attachment := range attachments[1:] {
@@ -127,17 +123,19 @@ func arrange(agent Agent, configuration config.Config, metadata task.Metadata, w
 		}
 		launcherArguments = append(launcherArguments, "--add-dir", workspacePath)
 		launcherArguments = append(launcherArguments, arguments...)
-		return workspacePath, launcherArguments, configuration.Agents.Codex.Command
-	default:
-		return workspacePath, arguments, configuration.Agents.Pi.Command
+		invocation.Arguments = launcherArguments
 	}
+	return invocation
 }
 
-func validateArguments(agent Agent, arguments []string) error {
+func validateForwardedArguments(agentLauncher AgentLauncher, arguments []string) error {
 	for _, argument := range arguments {
-		switch agent {
+		if argument == "--" {
+			break
+		}
+		switch agentLauncher {
 		case Claude:
-			if strings.HasPrefix(argument, "-w") || argument == "--worktree" || strings.HasPrefix(argument, "--worktree=") {
+			if argument == "-w" || strings.HasPrefix(argument, "-w=") || argument == "--worktree" || strings.HasPrefix(argument, "--worktree=") {
 				return fmt.Errorf("%w: Claude --worktree conflicts with the devtask-managed Task Worktree", ErrInvalid)
 			}
 		case Codex:

@@ -16,6 +16,12 @@ type Streams struct {
 	Stderr io.Writer
 }
 
+type Invocation struct {
+	Executable string
+	Directory  string
+	Arguments  []string
+}
+
 type ExitError struct {
 	Code int
 }
@@ -24,18 +30,18 @@ func (err *ExitError) Error() string {
 	return fmt.Sprintf("child process exited with code %d", err.Code)
 }
 
-func Run(executable, directory string, arguments []string, streams Streams) error {
-	resolved, err := exec.LookPath(executable)
+func Run(invocation Invocation, streams Streams) error {
+	resolved, err := exec.LookPath(invocation.Executable)
 	if err != nil {
-		return fmt.Errorf("resolve agent executable %q: %w", executable, err)
+		return fmt.Errorf("resolve Agent Launcher executable %q: %w", invocation.Executable, err)
 	}
-	command := exec.Command(resolved, arguments...)
-	command.Dir = directory
+	command := exec.Command(resolved, invocation.Arguments...)
+	command.Dir = invocation.Directory
 	command.Stdin = streams.Stdin
 	command.Stdout = streams.Stdout
 	command.Stderr = streams.Stderr
 	if err := command.Start(); err != nil {
-		return fmt.Errorf("start agent executable %q: %w", executable, err)
+		return fmt.Errorf("start Agent Launcher executable %q: %w", invocation.Executable, err)
 	}
 
 	signals := make(chan os.Signal, 1)
@@ -59,7 +65,7 @@ func Run(executable, directory string, arguments []string, streams Streams) erro
 	}
 	var exitError *exec.ExitError
 	if !errors.As(err, &exitError) {
-		return fmt.Errorf("wait for agent executable %q: %w", executable, err)
+		return fmt.Errorf("wait for Agent Launcher executable %q: %w", invocation.Executable, err)
 	}
 	code := exitError.ExitCode()
 	if status, ok := exitError.Sys().(syscall.WaitStatus); ok && status.Signaled() {

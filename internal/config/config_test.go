@@ -21,3 +21,11 @@ func TestLoadMissingConfigurationExplainsHowToInitialize(t *testing.T) {
 		}
 	}
 }
+
+func TestDecodeRejectsRelativeAgentLauncherExecutablePath(t *testing.T) {
+	_, err := decode([]byte("schema_version: 1\nagents:\n  pi:\n    command: ./bin/pi\n"))
+
+	if !errors.Is(err, ErrInvalid) || !strings.Contains(err.Error(), "one executable name or absolute path") {
+		t.Fatalf("decode error = %v, want relative Agent Launcher path validation", err)
+	}
+}
