@@ -102,18 +102,18 @@ func newTaskRemoveCommand(stdout io.Writer) *cobra.Command {
 				fetchOverride = &override
 			}
 			result, removeError := task.Remove(paths, configuration, args[0], task.RemoveOptions{Force: force, DeleteBranch: deleteBranch, Fetch: fetchOverride})
-			for _, repository := range result.Repositories {
-				if repository.WorktreeRemoved {
-					if _, writeError := fmt.Fprintf(stdout, "removed Task Worktree for %s from Task %s at %s\n", repository.RepositoryAlias, result.TaskName, repository.WorktreePath); writeError != nil {
+			for _, attachment := range result.Attachments {
+				if attachment.WorktreeRemoved {
+					if _, writeError := fmt.Fprintf(stdout, "removed Task Worktree for %s from Task %s at %s\n", attachment.RepositoryAlias, result.TaskName, attachment.WorktreePath); writeError != nil {
 						return writeError
 					}
 				}
-				if repository.BranchDeleted {
-					if _, writeError := fmt.Fprintf(stdout, "deleted Task Branch Name %s for %s\n", repository.TaskBranchName, repository.RepositoryAlias); writeError != nil {
+				if attachment.BranchDeleted {
+					if _, writeError := fmt.Fprintf(stdout, "deleted Task Branch Name %s for %s\n", attachment.TaskBranchName, attachment.RepositoryAlias); writeError != nil {
 						return writeError
 					}
-				} else if repository.Completed {
-					if _, writeError := fmt.Fprintf(stdout, "retained Task Branch Name %s for %s\n", repository.TaskBranchName, repository.RepositoryAlias); writeError != nil {
+				} else if attachment.Completed {
+					if _, writeError := fmt.Fprintf(stdout, "retained Task Branch Name %s for %s\n", attachment.TaskBranchName, attachment.RepositoryAlias); writeError != nil {
 						return writeError
 					}
 				}

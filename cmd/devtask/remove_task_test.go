@@ -2,9 +2,11 @@ package main
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -68,6 +70,12 @@ func TestRemoveTaskAggregatesEveryPreflightBlockerBeforeDeletingAnything(t *test
 	if err := os.WriteFile(agentsPath, append([]byte("# Human notes\n\n"), agents...), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	metadata := readPersistedTask(t, environment, "billing")
+	metadata.ContextFiles[1].SHA256 = "invalid"
+	writePersistedTask(t, environment, metadata)
+	if err := os.Remove(filepath.Join(workspace, "ledger")); err != nil {
+		t.Fatal(err)
+	}
 	metadataPath := filepath.Join(environment.dataHome, "devtask", "tasks", "billing.yaml")
 	beforeMetadata, err := os.ReadFile(metadataPath)
 	if err != nil {
@@ -79,7 +87,7 @@ func TestRemoveTaskAggregatesEveryPreflightBlockerBeforeDeletingAnything(t *test
 	if result.code != 2 {
 		t.Fatalf("remove code=%d stderr=%q, want validation failure", result.code, result.stderr)
 	}
-	for _, want := range []string{"edited TASK.md", "edited AGENTS.md", "new SPEC.md", "invoice", "modified", "ledger", "untracked"} {
+	for _, want := range []string{"edited TASK.md", "AGENTS.md", "invalid SHA-256 ownership digest", "new SPEC.md", "Task Workspace link", "invoice", "modified", "ledger", "untracked"} {
 		if !strings.Contains(result.stderr, want) {
 			t.Fatalf("stderr = %q, want aggregate blocker %q", result.stderr, want)
 		}
@@ -134,17 +142,81 @@ func TestRemoveTaskPersistsCompletedFailedAndUntouchedAttachments(t *testing.T) 
 		t.Fatalf("remaining Repository Attachments=%#v", metadata.Attachments)
 	}
 	joined := strings.Join(metadata.Incomplete.ResidualObjects, "\n")
-	for _, want := range []string{"completed Repository Attachment: invoice", "failed Repository Attachment: ledger", "untouched Repository Attachment: audit"} {
+	workspace := filepath.Join(environment.dataHome, "devtask", "workspaces", "billing")
+	for _, want := range []string{"completed Repository Attachment: invoice", "Task Workspace link is absent: " + filepath.Join(workspace, "invoice"), "generated AGENTS entry is absent: " + filepath.Join(workspace, "AGENTS.md"), "failed Repository Attachment: ledger", "untouched Repository Attachment: audit"} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("residuals=%q, want %q", joined, want)
 		}
 	}
-	workspace := filepath.Join(environment.dataHome, "devtask", "workspaces", "billing")
+	if _, err := os.Lstat(filepath.Join(workspace, "invoice")); !os.IsNotExist(err) {
+		t.Fatalf("completed invoice Task Workspace projection remains: %v", err)
+	}
+	agents, err := os.ReadFile(filepath.Join(workspace, "AGENTS.md"))
+	if err != nil || strings.Contains(string(agents), "`invoice`") {
+		t.Fatalf("completed invoice AGENTS projection remains: contents=%q err=%v", agents, err)
+	}
 	if _, err := os.Lstat(workspace); err != nil {
 		t.Fatalf("Task Workspace was removed after partial failure: %v", err)
 	}
 	if _, err := os.Lstat(filepath.Join(environment.dataHome, "devtask", "tasks", "billing.yaml")); err != nil {
 		t.Fatalf("Task metadata was removed after partial failure: %v", err)
+	}
+}
+
+func TestRemoveTaskRechecksEachAttachmentImmediatelyBeforeDeletion(t *testing.T) {
+	environment, repositories := createTaskWithAttachments(t, "invoice", "ledger")
+	signalPath := filepath.Join(t.TempDir(), "before-ledger")
+	command := exec.Command(devtaskBinaryWithTags(t, "devtask_test"), "remove", "billing", "--force")
+	command.Dir = environment.home
+	command.Env = append(filteredEnvironment(os.Environ()),
+		"HOME="+environment.home,
+		"XDG_CONFIG_HOME="+environment.configHome,
+		"XDG_DATA_HOME="+environment.dataHome,
+		"DEVTASK_TEST_PAUSE_BEFORE_TASK_REMOVE_ALIAS=ledger",
+		"DEVTASK_TEST_TASK_REMOVE_SIGNAL="+signalPath,
+	)
+	var stdout strings.Builder
+	var stderr strings.Builder
+	command.Stdout = &stdout
+	command.Stderr = &stderr
+	if err := command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if command.ProcessState == nil {
+			_ = command.Process.Kill()
+			_ = command.Wait()
+		}
+	})
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if _, err := os.Stat(signalPath + ".ready"); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("remove did not reach the second Repository Attachment boundary")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	ledgerWorktree := filepath.Join(repositories["ledger"], ".worktrees", "billing")
+	gitRun(t, "-C", repositories["ledger"], "worktree", "remove", "--force", ledgerWorktree)
+	if err := os.Mkdir(ledgerWorktree, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(signalPath+".continue"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err := command.Wait()
+	exitError, ok := err.(*exec.ExitError)
+	if !ok || exitError.ExitCode() != 1 || !strings.Contains(stderr.String(), "Git worktree record") {
+		t.Fatalf("identity race: err=%v stdout=%q stderr=%q", err, stdout.String(), stderr.String())
+	}
+	if info, err := os.Lstat(ledgerWorktree); err != nil || !info.IsDir() {
+		t.Fatalf("replacement Task Worktree path was deleted: info=%v err=%v", info, err)
+	}
+	metadata := readPersistedTask(t, environment, "billing")
+	if metadata.State != "incomplete" || len(metadata.Attachments) != 1 || metadata.Attachments[0].Alias != "ledger" {
+		t.Fatalf("identity-race metadata=%#v", metadata)
 	}
 }
 

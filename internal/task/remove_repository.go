@@ -148,27 +148,13 @@ func RemoveRepository(paths config.Paths, configuration config.Config, taskName,
 		return result, invalid("cannot remove Repository Attachment %q: %v", attachment.Alias, err)
 	}
 
-	deleteBaseRef := ""
+	var branchPlan *branchRemovalPlan
 	if options.DeleteBranch {
-		baseBranch, remote, fetch, err := removalBaseSettings(configuration, attachment, options.Fetch)
+		prepared, err := prepareBranchRemoval(configuration, attachment, options.Fetch, options.Force)
 		if err != nil {
 			return result, err
 		}
-		resolved, err := gitcmd.ResolveBaseRef(attachment.MainCheckout, baseBranch, remote, fetch)
-		if err != nil {
-			if errors.Is(err, gitcmd.ErrBaseRefNotFound) {
-				return result, invalid("current Base Ref %q for Repository Attachment %q does not exist: %v", baseBranch, attachment.Alias, err)
-			}
-			return result, fmt.Errorf("resolve current Base Ref %q for Repository Attachment %q: %w", baseBranch, attachment.Alias, err)
-		}
-		branchMerged, err := gitcmd.IsAncestor(attachment.MainCheckout, "refs/heads/"+attachment.TaskBranchName, resolved.Ref)
-		if err != nil {
-			return result, fmt.Errorf("verify Task Branch Name %q against current Base Ref %q: %w", attachment.TaskBranchName, resolved.Ref, err)
-		}
-		if !branchMerged && !options.Force {
-			return result, invalid("Task Branch Name %q is not fully merged into current Base Ref %q; retain it or rerun with both --delete-branch and --force", attachment.TaskBranchName, resolved.Ref)
-		}
-		deleteBaseRef = resolved.Ref
+		branchPlan = &prepared
 	}
 
 	protected, err = protectedWorktreeContent(attachment)
@@ -199,17 +185,8 @@ func RemoveRepository(paths config.Paths, configuration config.Config, taskName,
 		return result, progress.fail(err)
 	}
 	if options.DeleteBranch {
-		if !options.Force {
-			stillMerged, err := gitcmd.IsAncestor(attachment.MainCheckout, "refs/heads/"+attachment.TaskBranchName, deleteBaseRef)
-			if err != nil {
-				return result, progress.fail(fmt.Errorf("recheck Task Branch Name %q against current Base Ref %q: %w", attachment.TaskBranchName, deleteBaseRef, err))
-			}
-			if !stillMerged {
-				return result, progress.fail(fmt.Errorf("Task Branch Name %q changed and is no longer fully merged into current Base Ref %q; branch was retained", attachment.TaskBranchName, deleteBaseRef))
-			}
-		}
-		if err := gitcmd.DeleteBranch(attachment.MainCheckout, attachment.TaskBranchName); err != nil {
-			return result, progress.fail(fmt.Errorf("delete Task Branch Name %q: %w", attachment.TaskBranchName, err))
+		if err := branchPlan.remove(attachment, options.Force); err != nil {
+			return result, progress.fail(err)
 		}
 		result.BranchDeleted = true
 		if err := progress.checkpoint("Task Branch Name deletion completed; Task Workspace cleanup is pending"); err != nil {
@@ -230,6 +207,48 @@ func RemoveRepository(paths config.Paths, configuration config.Config, taskName,
 		return result, fmt.Errorf("Task Worktree was removed but Repository Attachment metadata could not be updated: %w; verify the absent path and Git record, then run 'devtask remove-repo %s %s --forget'", err, metadata.Name, attachment.Alias)
 	}
 	return result, nil
+}
+
+type branchRemovalPlan struct {
+	baseRef string
+}
+
+func prepareBranchRemoval(configuration config.Config, attachment RepositoryAttachment, fetchOverride *bool, force bool) (branchRemovalPlan, error) {
+	baseBranch, remote, fetch, err := removalBaseSettings(configuration, attachment, fetchOverride)
+	if err != nil {
+		return branchRemovalPlan{}, err
+	}
+	resolved, err := gitcmd.ResolveBaseRef(attachment.MainCheckout, baseBranch, remote, fetch)
+	if err != nil {
+		if errors.Is(err, gitcmd.ErrBaseRefNotFound) {
+			return branchRemovalPlan{}, invalid("current Base Ref %q for Repository Attachment %q does not exist: %v", baseBranch, attachment.Alias, err)
+		}
+		return branchRemovalPlan{}, fmt.Errorf("resolve current Base Ref %q for Repository Attachment %q: %w", baseBranch, attachment.Alias, err)
+	}
+	merged, err := gitcmd.IsAncestor(attachment.MainCheckout, "refs/heads/"+attachment.TaskBranchName, resolved.Ref)
+	if err != nil {
+		return branchRemovalPlan{}, fmt.Errorf("verify Task Branch Name %q against current Base Ref %q: %w", attachment.TaskBranchName, resolved.Ref, err)
+	}
+	if !merged && !force {
+		return branchRemovalPlan{}, invalid("Task Branch Name %q for Repository Attachment %q is not fully merged into current Base Ref %q; retain it or rerun with both --delete-branch and --force", attachment.TaskBranchName, attachment.Alias, resolved.Ref)
+	}
+	return branchRemovalPlan{baseRef: resolved.Ref}, nil
+}
+
+func (plan branchRemovalPlan) remove(attachment RepositoryAttachment, force bool) error {
+	if !force {
+		merged, err := gitcmd.IsAncestor(attachment.MainCheckout, "refs/heads/"+attachment.TaskBranchName, plan.baseRef)
+		if err != nil {
+			return fmt.Errorf("recheck Task Branch Name %q against current Base Ref %q: %w", attachment.TaskBranchName, plan.baseRef, err)
+		}
+		if !merged {
+			return fmt.Errorf("Task Branch Name %q changed and is no longer fully merged into current Base Ref %q; branch was retained", attachment.TaskBranchName, plan.baseRef)
+		}
+	}
+	if err := gitcmd.DeleteBranch(attachment.MainCheckout, attachment.TaskBranchName); err != nil {
+		return fmt.Errorf("delete Task Branch Name %q: %w", attachment.TaskBranchName, err)
+	}
+	return nil
 }
 
 func preflightForget(attachment RepositoryAttachment) error {
