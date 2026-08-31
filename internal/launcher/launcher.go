@@ -135,7 +135,7 @@ func validateForwardedArguments(agentLauncher AgentLauncher, arguments []string)
 		}
 		switch agentLauncher {
 		case Claude:
-			if argument == "-w" || strings.HasPrefix(argument, "-w=") || argument == "--worktree" || strings.HasPrefix(argument, "--worktree=") {
+			if strings.HasPrefix(argument, "-w") || argument == "--worktree" || strings.HasPrefix(argument, "--worktree=") {
 				return fmt.Errorf("%w: Claude --worktree conflicts with the devtask-managed Task Worktree", ErrInvalid)
 			}
 		case Codex:

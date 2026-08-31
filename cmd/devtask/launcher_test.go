@@ -125,6 +125,7 @@ func TestAgentLaunchersRejectArgumentsThatTakeOverManagedTaskWorktrees(t *testin
 		{name: "Claude worktree equals flag", launcherName: "claude", args: []string{"--worktree=other"}},
 		{name: "Claude short worktree flag", launcherName: "claude", args: []string{"-w", "other"}},
 		{name: "Claude short worktree equals flag", launcherName: "claude", args: []string{"-w=other"}},
+		{name: "Claude compact short worktree flag", launcherName: "claude", args: []string{"-wother"}},
 		{name: "Codex working root flag", launcherName: "codex", args: []string{"-C", "/tmp/other"}},
 		{name: "Codex compact working root flag", launcherName: "codex", args: []string{"-C/tmp/other"}},
 		{name: "Codex long working root flag", launcherName: "codex", args: []string{"--cd=/tmp/other"}},
@@ -181,7 +182,7 @@ func TestAgentLaunchersPreserveNonConflictingSimilarOptions(t *testing.T) {
 		launcherName string
 		argument     string
 	}{
-		{launcherName: "claude", argument: "-write-this-prompt"},
+		{launcherName: "claude", argument: "--web-search"},
 		{launcherName: "codex", argument: "--config=/user/settings.toml"},
 	}
 	for _, test := range tests {
