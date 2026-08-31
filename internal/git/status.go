@@ -13,6 +13,37 @@ type WorktreeStatus struct {
 	Conflicted bool
 }
 
+func Status(directory string) (WorktreeStatus, error) {
+	output, err := Run(directory, "status", "--porcelain=v1", "-z", "--untracked-files=all")
+	if err != nil {
+		return WorktreeStatus{}, err
+	}
+	return ParseStatusPorcelainV1Z(output)
+}
+
+func IgnoredPaths(directory string) ([]string, error) {
+	output, err := Run(directory, "ls-files", "--others", "--ignored", "--exclude-standard", "-z")
+	if err != nil {
+		return nil, err
+	}
+	return parseNULPaths(output)
+}
+
+func parseNULPaths(output []byte) ([]string, error) {
+	if len(output) == 0 {
+		return []string{}, nil
+	}
+	if output[len(output)-1] != 0 {
+		return nil, errors.New("Git ignored-path output is not NUL terminated")
+	}
+	records := bytes.Split(output[:len(output)-1], []byte{0})
+	paths := make([]string, len(records))
+	for index, record := range records {
+		paths[index] = string(record)
+	}
+	return paths, nil
+}
+
 func ParseStatusPorcelainV1Z(output []byte) (WorktreeStatus, error) {
 	var status WorktreeStatus
 	if len(output) == 0 {

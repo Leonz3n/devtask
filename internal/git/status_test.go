@@ -34,3 +34,22 @@ func TestParseStatusPorcelainV1ZRejectsMalformedRecords(t *testing.T) {
 		}
 	}
 }
+
+func TestParseNULPathsPreservesUnusualIgnoredNames(t *testing.T) {
+	paths, err := parseNULPaths([]byte("local.cache\x00nested/name\nwith-tab\t\x00"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(paths) != 2 || paths[0] != "local.cache" || paths[1] != "nested/name\nwith-tab\t" {
+		t.Fatalf("ignored paths = %#v", paths)
+	}
+	if empty, err := parseNULPaths(nil); err != nil || len(empty) != 0 {
+		t.Fatalf("empty ignored paths = %#v, %v", empty, err)
+	}
+}
+
+func TestParseNULPathsRejectsUnterminatedOutput(t *testing.T) {
+	if _, err := parseNULPaths([]byte("local.cache")); err == nil {
+		t.Fatal("unterminated ignored-path output succeeded")
+	}
+}

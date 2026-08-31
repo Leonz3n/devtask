@@ -47,6 +47,10 @@ func RefExists(directory, ref string) (bool, error) {
 	return RunPredicate(directory, "show-ref", "--verify", "--quiet", ref)
 }
 
+func IsAncestor(directory, ancestor, descendant string) (bool, error) {
+	return RunPredicate(directory, "merge-base", "--is-ancestor", ancestor, descendant)
+}
+
 func PathTracked(directory, path string) (bool, error) {
 	return RunPredicate(directory, "ls-files", "--error-unmatch", "--", path)
 }

@@ -40,6 +40,111 @@ type projectionLink struct {
 	created bool
 }
 
+type RemovalProjection struct {
+	workspacePath string
+	agentsPath    string
+	linkPath      string
+	linkTarget    string
+	linkInfo      os.FileInfo
+	original      []byte
+	updated       []byte
+	agentsInfo    os.FileInfo
+}
+
+func PrepareRemovalProjection(workspacePath, taskName, taskBranchName string, removed Attachment, remaining []Attachment, allowMissingLink bool) (*RemovalProjection, error) {
+	workspaceInfo, err := os.Lstat(workspacePath)
+	if err != nil {
+		return nil, fmt.Errorf("inspect Task Workspace %q: %w", workspacePath, err)
+	}
+	if !workspaceInfo.IsDir() || workspaceInfo.Mode()&os.ModeSymlink != 0 {
+		return nil, fmt.Errorf("%w at %q: expected a directory", ErrCollision, workspacePath)
+	}
+	canonicalWorkspace, err := filepath.EvalSymlinks(workspacePath)
+	if err != nil {
+		return nil, fmt.Errorf("resolve Task Workspace %q: %w", workspacePath, err)
+	}
+	if removed.Alias == "" || removed.Alias == "." || removed.Alias == ".." || filepath.Base(removed.Alias) != removed.Alias {
+		return nil, fmt.Errorf("%w: Repository Alias %q does not name a direct Task Workspace entry", ErrCollision, removed.Alias)
+	}
+	linkPath := filepath.Join(workspacePath, removed.Alias)
+	canonicalLinkParent, err := filepath.EvalSymlinks(filepath.Dir(linkPath))
+	if err != nil || canonicalLinkParent != canonicalWorkspace {
+		return nil, fmt.Errorf("%w at %q: Repository Alias path escapes the Task Workspace", ErrCollision, linkPath)
+	}
+	linkTarget, err := filepath.Rel(canonicalWorkspace, removed.WorktreePath)
+	if err != nil {
+		return nil, fmt.Errorf("calculate Task Workspace link for %q: %w", removed.Alias, err)
+	}
+	linkInfo, err := os.Lstat(linkPath)
+	if errors.Is(err, os.ErrNotExist) && allowMissingLink {
+		linkInfo = nil
+	} else if err != nil {
+		return nil, fmt.Errorf("inspect Task Workspace link %q: %w", linkPath, err)
+	} else if linkInfo.Mode()&os.ModeSymlink == 0 {
+		return nil, fmt.Errorf("%w at %q: Repository Alias path is not the recorded symlink", ErrCollision, linkPath)
+	} else if target, readError := os.Readlink(linkPath); readError != nil {
+		return nil, fmt.Errorf("inspect Task Workspace link %q: %w", linkPath, readError)
+	} else if target != linkTarget {
+		return nil, fmt.Errorf("%w at %q: Repository Alias link target changed", ErrCollision, linkPath)
+	}
+	agentsPath := filepath.Join(workspacePath, "AGENTS.md")
+	agentsInfo, err := os.Lstat(agentsPath)
+	if err != nil {
+		return nil, fmt.Errorf("inspect Task Context File %q: %w", agentsPath, err)
+	}
+	if !agentsInfo.Mode().IsRegular() {
+		return nil, fmt.Errorf("%w at %q: AGENTS.md is not a regular file", ErrCollision, agentsPath)
+	}
+	original, err := os.ReadFile(agentsPath)
+	if err != nil {
+		return nil, fmt.Errorf("read Task Context File %q: %w", agentsPath, err)
+	}
+	updated, err := replaceGeneratedSection(original, generatedSection(taskName, taskBranchName, remaining))
+	if err != nil {
+		return nil, fmt.Errorf("%w at %q: %v", ErrCollision, agentsPath, err)
+	}
+	return &RemovalProjection{workspacePath: workspacePath, agentsPath: agentsPath, linkPath: linkPath, linkTarget: linkTarget, linkInfo: linkInfo, original: original, updated: updated, agentsInfo: agentsInfo}, nil
+}
+
+func (projection *RemovalProjection) Commit() error {
+	currentAgentsInfo, err := os.Lstat(projection.agentsPath)
+	if err != nil {
+		return fmt.Errorf("recheck AGENTS.md: %w", err)
+	}
+	currentAgents, err := os.ReadFile(projection.agentsPath)
+	if err != nil {
+		return fmt.Errorf("recheck AGENTS.md: %w", err)
+	}
+	if !os.SameFile(projection.agentsInfo, currentAgentsInfo) || !bytes.Equal(currentAgents, projection.original) {
+		return fmt.Errorf("%w at %q: AGENTS.md changed during removal", ErrCollision, projection.agentsPath)
+	}
+	if projection.linkInfo != nil {
+		currentLinkInfo, err := os.Lstat(projection.linkPath)
+		if err != nil {
+			return fmt.Errorf("recheck Task Workspace link %q: %w", projection.linkPath, err)
+		}
+		target, err := os.Readlink(projection.linkPath)
+		if err != nil || !os.SameFile(projection.linkInfo, currentLinkInfo) || target != projection.linkTarget {
+			return fmt.Errorf("%w at %q: Repository Alias link changed during removal", ErrCollision, projection.linkPath)
+		}
+		if err := os.Remove(projection.linkPath); err != nil {
+			return fmt.Errorf("remove Task Workspace link %q: %w", projection.linkPath, err)
+		}
+	}
+	outcome, err := fileutil.WriteAtomicIfUnchanged(projection.agentsPath, projection.original, projection.updated, 0o600)
+	if err != nil {
+		if projection.linkInfo != nil && !outcome.Published {
+			err = errors.Join(err, os.Symlink(projection.linkTarget, projection.linkPath))
+		}
+		return fmt.Errorf("update AGENTS.md during removal: %w", err)
+	}
+	return fileutil.SyncDirectory(projection.workspacePath)
+}
+
+func (projection *RemovalProjection) RefreshOwnedContextFiles(files []ContextFile) []ContextFile {
+	return refreshOwnedContextFiles(files, projection.original, projection.updated)
+}
+
 func PrepareProjection(workspacePath, taskName, taskBranchName, alias, worktreePath string, attachments []Attachment) (*Projection, error) {
 	return PrepareProjectionBatch(workspacePath, taskName, taskBranchName, []Attachment{{Alias: alias, WorktreePath: worktreePath}}, attachments)
 }
@@ -135,9 +240,13 @@ func (projection *Projection) Commit() error {
 }
 
 func (projection *Projection) RefreshOwnedContextFiles(files []ContextFile) []ContextFile {
+	return refreshOwnedContextFiles(files, projection.original, projection.updated)
+}
+
+func refreshOwnedContextFiles(files []ContextFile, original, updated []byte) []ContextFile {
 	refreshed := append([]ContextFile(nil), files...)
-	originalDigest := sha256.Sum256(projection.original)
-	updatedDigest := sha256.Sum256(projection.updated)
+	originalDigest := sha256.Sum256(original)
+	updatedDigest := sha256.Sum256(updated)
 	for index := range refreshed {
 		if refreshed[index].Path == "AGENTS.md" && refreshed[index].SHA256 == hex.EncodeToString(originalDigest[:]) {
 			refreshed[index].SHA256 = hex.EncodeToString(updatedDigest[:])

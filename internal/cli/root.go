@@ -59,13 +59,82 @@ func NewRootCommand(stdout, stderr io.Writer) *cobra.Command {
 	})
 	root.AddCommand(newInitCommand(stdout))
 	root.AddCommand(newRepoCommand(stdout))
-	root.AddCommand(newTaskCommand(stdout), newTaskListCommand(stdout), newTaskAddCommand(stdout, stderr), newTaskStatusCommand(stdout))
+	root.AddCommand(newTaskCommand(stdout), newTaskListCommand(stdout), newTaskAddCommand(stdout, stderr), newTaskStatusCommand(stdout), newTaskRemoveRepositoryCommand(stdout))
 	root.AddCommand(
 		newAgentLauncherCommand(launcher.Pi, os.Stdin, stdout, stderr),
 		newAgentLauncherCommand(launcher.Claude, os.Stdin, stdout, stderr),
 		newAgentLauncherCommand(launcher.Codex, os.Stdin, stdout, stderr),
 	)
 	return root
+}
+
+func newTaskRemoveRepositoryCommand(stdout io.Writer) *cobra.Command {
+	var force bool
+	var deleteBranch bool
+	var forget bool
+	var fetch bool
+	var noFetch bool
+	command := &cobra.Command{
+		Use:   "remove-repo <task> <alias>",
+		Short: "Remove one Repository Attachment from a Task",
+		Args: func(cmd *cobra.Command, args []string) error {
+			if err := cobra.ExactArgs(2)(cmd, args); err != nil {
+				return &validationError{err: err}
+			}
+			if cmd.Flags().Changed("fetch") && cmd.Flags().Changed("no-fetch") {
+				return &validationError{err: errors.New("--fetch and --no-fetch are mutually exclusive")}
+			}
+			if forget && deleteBranch {
+				return &validationError{err: errors.New("--forget and --delete-branch are mutually exclusive")}
+			}
+			return nil
+		},
+		RunE: func(cmd *cobra.Command, args []string) error {
+			paths, err := config.ResolvePaths()
+			if err != nil {
+				return err
+			}
+			configuration, err := config.Load(paths.ConfigFile)
+			if err != nil {
+				return err
+			}
+			var fetchOverride *bool
+			if cmd.Flags().Changed("fetch") {
+				fetchOverride = &fetch
+			} else if cmd.Flags().Changed("no-fetch") {
+				override := !noFetch
+				fetchOverride = &override
+			}
+			result, err := task.RemoveRepository(paths, configuration, args[0], args[1], task.RemoveRepositoryOptions{Force: force, DeleteBranch: deleteBranch, Forget: forget, Fetch: fetchOverride})
+			if result.WorktreeRemoved {
+				if _, writeError := fmt.Fprintf(stdout, "removed Task Worktree for %s from Task %s at %s\n", result.RepositoryAlias, result.TaskName, result.WorktreePath); writeError != nil {
+					return writeError
+				}
+			}
+			if result.AttachmentForgot {
+				if _, writeError := fmt.Fprintf(stdout, "forgot Repository Attachment %s from Task %s\n", result.RepositoryAlias, result.TaskName); writeError != nil {
+					return writeError
+				}
+			}
+			if result.BranchDeleted {
+				if _, writeError := fmt.Fprintf(stdout, "deleted Task Branch Name %s for %s\n", result.TaskBranchName, result.RepositoryAlias); writeError != nil {
+					return writeError
+				}
+			} else if err == nil && !result.AttachmentForgot {
+				if _, writeError := fmt.Fprintf(stdout, "retained Task Branch Name %s for %s\n", result.TaskBranchName, result.RepositoryAlias); writeError != nil {
+					return writeError
+				}
+			}
+			return err
+		},
+	}
+	command.Flags().BoolVar(&force, "force", false, "authorize removal of protected Task Worktree content")
+	command.Flags().BoolVar(&deleteBranch, "delete-branch", false, "delete the Task Branch Name after removing the Task Worktree")
+	command.Flags().BoolVar(&forget, "forget", false, "remove metadata after the Task Worktree path and Git record are already absent")
+	command.Flags().BoolVar(&fetch, "fetch", false, "fetch the configured remote before resolving the current Base Ref")
+	command.Flags().BoolVar(&noFetch, "no-fetch", false, "use current refs without fetching")
+	command.MarkFlagsMutuallyExclusive("fetch", "no-fetch")
+	return command
 }
 
 func newAgentLauncherCommand(agentLauncher launcher.AgentLauncher, stdin io.Reader, stdout, stderr io.Writer) *cobra.Command {
