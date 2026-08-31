@@ -241,8 +241,17 @@ func load(path string) (Metadata, error) {
 	return metadata, nil
 }
 
-func lockPath(paths config.Paths, name string) string {
+func LockPath(paths config.Paths, name string) string {
 	return filepath.Join(paths.TasksDir, "."+strings.ToLower(name)+".lock")
+}
+
+func Load(paths config.Paths, name string) (Metadata, error) {
+	_, _, metadata, err := loadForUpdate(paths, name)
+	return metadata, err
+}
+
+func lockPath(paths config.Paths, name string) string {
+	return LockPath(paths, name)
 }
 
 func writeAtomicNew(path string, contents []byte) (bool, os.FileInfo, error) {

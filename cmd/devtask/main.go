@@ -9,7 +9,9 @@ import (
 
 func main() {
 	if err := cli.Execute(); err != nil {
-		fmt.Fprintf(os.Stderr, "devtask: %v\n", err)
+		if cli.ShouldReportError(err) {
+			fmt.Fprintf(os.Stderr, "devtask: %v\n", err)
+		}
 		os.Exit(cli.ExitCode(err))
 	}
 }

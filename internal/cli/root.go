@@ -11,7 +11,9 @@ import (
 	"time"
 
 	"github.com/Leonz3n/devtask/internal/config"
+	"github.com/Leonz3n/devtask/internal/launcher"
 	"github.com/Leonz3n/devtask/internal/repo"
+	"github.com/Leonz3n/devtask/internal/runner"
 	"github.com/Leonz3n/devtask/internal/task"
 	"github.com/spf13/cobra"
 )
@@ -58,7 +60,45 @@ func NewRootCommand(stdout, stderr io.Writer) *cobra.Command {
 	root.AddCommand(newInitCommand(stdout))
 	root.AddCommand(newRepoCommand(stdout))
 	root.AddCommand(newTaskCommand(stdout), newTaskListCommand(stdout), newTaskAddCommand(stdout, stderr), newTaskStatusCommand(stdout))
+	root.AddCommand(
+		newAgentCommand(launcher.Pi, os.Stdin, stdout, stderr),
+		newAgentCommand(launcher.Claude, os.Stdin, stdout, stderr),
+		newAgentCommand(launcher.Codex, os.Stdin, stdout, stderr),
+	)
 	return root
+}
+
+func newAgentCommand(agent launcher.Agent, stdin io.Reader, stdout, stderr io.Writer) *cobra.Command {
+	command := &cobra.Command{
+		Use:   string(agent) + " <task> [-- <args>...]",
+		Short: "Launch " + string(agent) + " for a Task",
+		Args:  launcherArgs,
+		RunE: func(_ *cobra.Command, args []string) error {
+			paths, err := config.ResolvePaths()
+			if err != nil {
+				return err
+			}
+			configuration, err := config.Load(paths.ConfigFile)
+			if err != nil {
+				return err
+			}
+			return launcher.Launch(paths, configuration, agent, args[0], args[1:], launcher.Streams{Stdin: stdin, Stdout: stdout, Stderr: stderr})
+		},
+	}
+	return command
+}
+
+func launcherArgs(cmd *cobra.Command, args []string) error {
+	if len(args) < 1 {
+		return &validationError{err: errors.New("requires a Task name")}
+	}
+	if dash := cmd.ArgsLenAtDash(); dash >= 0 && dash != 1 {
+		return &validationError{err: errors.New("agent arguments must follow exactly one Task name and --")}
+	}
+	if cmd.ArgsLenAtDash() < 0 && len(args) != 1 {
+		return &validationError{err: errors.New("agent arguments must follow --")}
+	}
+	return nil
 }
 
 func newTaskStatusCommand(stdout io.Writer) *cobra.Command {
@@ -454,8 +494,17 @@ func ExitCode(err error) int {
 		return 0
 	}
 	var validation *validationError
-	if errors.As(err, &validation) || errors.Is(err, config.ErrInvalid) || errors.Is(err, config.ErrNotInitialized) || errors.Is(err, task.ErrInvalid) {
+	var childExit *runner.ExitError
+	if errors.As(err, &childExit) {
+		return childExit.Code
+	}
+	if errors.As(err, &validation) || errors.Is(err, config.ErrInvalid) || errors.Is(err, config.ErrNotInitialized) || errors.Is(err, task.ErrInvalid) || errors.Is(err, launcher.ErrInvalid) {
 		return 2
 	}
 	return 1
+}
+
+func ShouldReportError(err error) bool {
+	var childExit *runner.ExitError
+	return !errors.As(err, &childExit)
 }
