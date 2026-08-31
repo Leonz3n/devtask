@@ -414,6 +414,45 @@ func TestStatusRejectsInvalidRequestsWithValidationExitCode(t *testing.T) {
 	}
 }
 
+func TestStatusAbbreviatesHomePathsOnlyInHumanOutput(t *testing.T) {
+	environment := newCLITestEnvironment(t)
+	environment.configHome = filepath.Join(environment.home, ".config")
+	environment.dataHome = filepath.Join(environment.home, ".local", "share")
+	if result := environment.run(t, "init"); result.code != 0 {
+		t.Fatalf("init failed: %s", result.stderr)
+	}
+	repository := filepath.Join(environment.home, "src", "invoice")
+	gitRun(t, "init", "-b", "main", repository)
+	if err := os.WriteFile(filepath.Join(repository, "tracked.txt"), []byte("tracked\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitRun(t, "-C", repository, "add", "tracked.txt")
+	gitRun(t, "-C", repository, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "initial")
+	if result := environment.run(t, "repo", "add", "invoice", repository); result.code != 0 {
+		t.Fatalf("repo add failed: %s", result.stderr)
+	}
+	if result := environment.run(t, "new", "billing"); result.code != 0 {
+		t.Fatalf("new failed: %s", result.stderr)
+	}
+	if result := environment.run(t, "add", "billing", "invoice", "--no-fetch"); result.code != 0 {
+		t.Fatalf("add failed: %s", result.stderr)
+	}
+
+	human := environment.run(t, "status", "billing")
+	for _, want := range []string{"~/.local/share/devtask/workspaces/billing", "~/src/invoice/.worktrees/billing"} {
+		if !strings.Contains(human.stdout, want) {
+			t.Fatalf("human status = %q, want concise path %q", human.stdout, want)
+		}
+	}
+	if strings.Contains(human.stdout, environment.home) {
+		t.Fatalf("human status contains unabbreviated home path: %q", human.stdout)
+	}
+	machine := environment.run(t, "status", "billing", "--json")
+	if !strings.Contains(machine.stdout, environment.home) || strings.Contains(machine.stdout, `"~`) {
+		t.Fatalf("JSON status does not preserve absolute paths: %q", machine.stdout)
+	}
+}
+
 func assertMissingStatus(t *testing.T, status attachmentStatusJSON, operation string) {
 	t.Helper()
 	if status.Clean || !status.Missing || status.Unknown || status.Inspection == nil || !strings.Contains(status.Inspection.Operation, operation) || status.Inspection.Message == "" || len(status.Inspection.Recovery) == 0 {

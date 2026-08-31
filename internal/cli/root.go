@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -85,7 +86,7 @@ func newTaskStatusCommand(stdout io.Writer) *cobra.Command {
 				encoder.SetEscapeHTML(false)
 				return encoder.Encode(report)
 			}
-			if _, err := fmt.Fprintf(stdout, "Task %s [%s]\n  Task Branch Name: %s\n  Created: %s\n  Task Workspace: %s\n", report.Name, formatTaskState(report), report.TaskBranchName, report.CreatedAt.Format(time.RFC3339), report.WorkspacePath); err != nil {
+			if _, err := fmt.Fprintf(stdout, "Task %s [%s]\n  Task Branch Name: %s\n  Created: %s\n  Task Workspace: %s\n", report.Name, formatTaskState(report), report.TaskBranchName, report.CreatedAt.Format(time.RFC3339), humanPath(report.WorkspacePath)); err != nil {
 				return err
 			}
 			if report.Inspection != nil {
@@ -115,7 +116,7 @@ func newTaskStatusCommand(stdout io.Writer) *cobra.Command {
 			}
 			for _, attachment := range report.Attachments {
 				state := formatAttachmentState(attachment)
-				if _, err := fmt.Fprintf(stdout, "  %s\t%s\t%s\n", attachment.Alias, state, attachment.WorktreePath); err != nil {
+				if _, err := fmt.Fprintf(stdout, "  %s\t%s\t%s\n", attachment.Alias, state, humanPath(attachment.WorktreePath)); err != nil {
 					return err
 				}
 				if attachment.Inspection != nil {
@@ -155,6 +156,28 @@ func formatTaskState(report task.StatusReport) string {
 		states = append(states, "unknown")
 	}
 	return strings.Join(states, ", ")
+}
+
+func humanPath(path string) string {
+	home, err := os.UserHomeDir()
+	if err != nil || !filepath.IsAbs(path) {
+		return path
+	}
+	homes := []string{filepath.Clean(home)}
+	if canonicalHome, canonicalError := filepath.EvalSymlinks(home); canonicalError == nil && canonicalHome != homes[0] {
+		homes = append(homes, canonicalHome)
+	}
+	for _, candidate := range homes {
+		relative, relativeError := filepath.Rel(candidate, path)
+		if relativeError != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+			continue
+		}
+		if relative == "." {
+			return "~"
+		}
+		return filepath.Join("~", relative)
+	}
+	return path
 }
 
 func formatAttachmentState(attachment task.AttachmentStatus) string {
