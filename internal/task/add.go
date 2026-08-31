@@ -151,15 +151,29 @@ func AddRepository(paths config.Paths, configuration config.Config, taskName, re
 	if err != nil {
 		return AddResult{}, err
 	}
-	rollback := func(cause error, worktreeCreated bool) error {
+	rollback := func(cause error, cleanGitObjects bool) error {
 		var rollbackErrors []error
 		rollbackErrors = append(rollbackErrors, projection.Abort())
-		if worktreeCreated {
-			if removeError := gitcmd.RemoveWorktree(mainCheckout, expectedWorktree); removeError != nil {
-				rollbackErrors = append(rollbackErrors, fmt.Errorf("remove Task Worktree: %w", removeError))
+		if cleanGitObjects {
+			if _, recordError := gitcmd.WorktreeAt(mainCheckout, expectedWorktree); recordError == nil {
+				if removeError := gitcmd.RemoveWorktree(mainCheckout, expectedWorktree); removeError != nil {
+					rollbackErrors = append(rollbackErrors, fmt.Errorf("remove Task Worktree: %w", removeError))
+				}
+			} else if errors.Is(recordError, gitcmd.ErrWorktreeRecordNotFound) {
+				if _, pathError := os.Lstat(expectedWorktree); pathError == nil {
+					rollbackErrors = append(rollbackErrors, fmt.Errorf("unregistered Task Worktree path remains at %q; refuse automatic removal", expectedWorktree))
+				} else if !errors.Is(pathError, os.ErrNotExist) {
+					rollbackErrors = append(rollbackErrors, fmt.Errorf("inspect failed Task Worktree path: %w", pathError))
+				}
+			} else {
+				rollbackErrors = append(rollbackErrors, fmt.Errorf("inspect Task Worktree record during rollback: %w", recordError))
 			}
-			if deleteError := gitcmd.DeleteBranch(mainCheckout, metadata.TaskBranchName); deleteError != nil {
-				rollbackErrors = append(rollbackErrors, fmt.Errorf("delete Task Branch Name: %w", deleteError))
+			if exists, branchError := gitcmd.RefExists(mainCheckout, branchRef); branchError != nil {
+				rollbackErrors = append(rollbackErrors, fmt.Errorf("inspect Task Branch Name during rollback: %w", branchError))
+			} else if exists {
+				if deleteError := gitcmd.DeleteBranch(mainCheckout, metadata.TaskBranchName); deleteError != nil {
+					rollbackErrors = append(rollbackErrors, fmt.Errorf("delete Task Branch Name: %w", deleteError))
+				}
 			}
 		}
 		if rootCreated {
@@ -179,7 +193,7 @@ func AddRepository(paths config.Paths, configuration config.Config, taskName, re
 	}
 
 	if err := gitcmd.CreateWorktree(mainCheckout, expectedWorktree, metadata.TaskBranchName, baseRef); err != nil {
-		return AddResult{}, rollback(fmt.Errorf("create Task Worktree for repository %q: %w", alias, err), false)
+		return AddResult{}, rollback(fmt.Errorf("create Task Worktree for repository %q: %w", alias, err), true)
 	}
 	canonicalWorktree, err := filepath.EvalSymlinks(expectedWorktree)
 	if err != nil {

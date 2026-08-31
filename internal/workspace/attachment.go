@@ -169,7 +169,21 @@ func (projection *Projection) Abort() error {
 func replaceGeneratedSection(document, generated []byte) ([]byte, error) {
 	start := []byte(GeneratedStart)
 	end := []byte(GeneratedEnd)
-	if bytes.Count(document, start) != 1 || bytes.Count(document, end) != 1 {
+	startCount := bytes.Count(document, start)
+	endCount := bytes.Count(document, end)
+	if startCount == 0 && endCount == 0 {
+		result := append([]byte(nil), document...)
+		if len(result) > 0 {
+			if result[len(result)-1] != '\n' {
+				result = append(result, '\n')
+			}
+			result = append(result, '\n')
+		}
+		result = append(result, generated...)
+		result = append(result, '\n')
+		return result, nil
+	}
+	if startCount != 1 || endCount != 1 {
 		return nil, errors.New("AGENTS.md must contain exactly one generated marker pair")
 	}
 	startIndex := bytes.Index(document, start)

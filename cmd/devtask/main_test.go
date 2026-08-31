@@ -1065,7 +1065,7 @@ func TestAddRejectsWorkspaceOwnershipCollisionBeforeGitMutation(t *testing.T) {
 	}
 }
 
-func TestAddDoesNotRewriteAnEffectiveWorktreeIgnore(t *testing.T) {
+func TestAddPreservesEffectiveIgnoreAndAppendsMissingGeneratedSection(t *testing.T) {
 	environment := initializedCLIEnvironment(t)
 	repository := filepath.Join(t.TempDir(), "service")
 	gitRun(t, "init", "-b", "main", repository)
@@ -1085,6 +1085,11 @@ func TestAddDoesNotRewriteAnEffectiveWorktreeIgnore(t *testing.T) {
 	if result := environment.run(t, "new", "billing"); result.code != 0 {
 		t.Fatalf("new failed: %s", result.stderr)
 	}
+	agentsPath := filepath.Join(environment.dataHome, "devtask", "workspaces", "billing", "AGENTS.md")
+	manualAgents := []byte("# Existing agent guidance\n")
+	if err := os.WriteFile(agentsPath, manualAgents, 0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	result := environment.run(t, "add", "billing", "service")
 
@@ -1097,6 +1102,60 @@ func TestAddDoesNotRewriteAnEffectiveWorktreeIgnore(t *testing.T) {
 	}
 	if !bytes.Equal(contents, existing) {
 		t.Fatalf("effective local exclude was rewritten:\nbefore: %s\nafter: %s", existing, contents)
+	}
+	updatedAgents, err := os.ReadFile(agentsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.HasPrefix(updatedAgents, manualAgents) || !bytes.Contains(updatedAgents, []byte("<!-- devtask:generated:start -->")) || !bytes.Contains(updatedAgents, []byte("- `service`:")) {
+		t.Fatalf("marker-free AGENTS.md was not preserved and extended:\n%s", updatedAgents)
+	}
+}
+
+func TestAddCompensatesPartialGitWorktreeCreation(t *testing.T) {
+	environment := initializedCLIEnvironment(t)
+	repository := filepath.Join(t.TempDir(), "service")
+	gitRun(t, "init", "-b", "main", repository)
+	gitRun(t, "-C", repository, "config", "user.name", "Test")
+	gitRun(t, "-C", repository, "config", "user.email", "test@example.com")
+	gitRun(t, "-C", repository, "config", "filter.fail.clean", "cat")
+	gitRun(t, "-C", repository, "config", "filter.fail.smudge", "false")
+	gitRun(t, "-C", repository, "config", "filter.fail.required", "true")
+	if err := os.WriteFile(filepath.Join(repository, ".gitattributes"), []byte("filtered.txt filter=fail\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repository, "filtered.txt"), []byte("content\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitRun(t, "-C", repository, "add", ".")
+	gitRun(t, "-C", repository, "commit", "-m", "initial")
+	if result := environment.run(t, "repo", "add", "service", repository); result.code != 0 {
+		t.Fatalf("repo add failed: %s", result.stderr)
+	}
+	if result := environment.run(t, "new", "billing"); result.code != 0 {
+		t.Fatalf("new failed: %s", result.stderr)
+	}
+
+	result := environment.run(t, "add", "billing", "service")
+
+	if result.code != 1 || !strings.Contains(result.stderr, "smudge filter fail") {
+		t.Fatalf("partial worktree result: code=%d stderr=%q", result.code, result.stderr)
+	}
+	metadata := readPersistedTask(t, environment, "billing")
+	if metadata.State != "ready" || metadata.Incomplete != nil || len(metadata.Attachments) != 0 {
+		t.Fatalf("fully compensated worktree failure metadata = %#v", metadata)
+	}
+	if exists := gitRun(t, "-C", repository, "branch", "--list", "feat/billing"); exists != "" {
+		t.Fatalf("partial worktree rollback left Task Branch: %q", exists)
+	}
+	partialPath := filepath.Join(repository, ".worktrees", "billing")
+	if _, err := os.Lstat(partialPath); !os.IsNotExist(err) {
+		t.Fatalf("partial worktree rollback left path: %v", err)
+	}
+	gitRun(t, "-C", repository, "config", "filter.fail.smudge", "cat")
+	retried := environment.run(t, "add", "billing", "service")
+	if retried.code != 0 {
+		t.Fatalf("retry after compensated worktree failure failed: %s", retried.stderr)
 	}
 }
 
