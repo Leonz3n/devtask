@@ -26,16 +26,24 @@ type Attachment struct {
 type Projection struct {
 	workspacePath   string
 	agentsPath      string
-	linkPath        string
-	linkTarget      string
+	links           []projectionLink
 	original        []byte
 	updated         []byte
 	agentsInfo      os.FileInfo
-	linkCreated     bool
 	agentsPublished bool
 }
 
+type projectionLink struct {
+	path    string
+	target  string
+	created bool
+}
+
 func PrepareProjection(workspacePath, taskName, taskBranchName, alias, worktreePath string, attachments []Attachment) (*Projection, error) {
+	return PrepareProjectionBatch(workspacePath, taskName, taskBranchName, []Attachment{{Alias: alias, WorktreePath: worktreePath}}, attachments)
+}
+
+func PrepareProjectionBatch(workspacePath, taskName, taskBranchName string, additions, attachments []Attachment) (*Projection, error) {
 	workspaceInfo, err := os.Lstat(workspacePath)
 	if err != nil {
 		return nil, fmt.Errorf("inspect Task Workspace %q: %w", workspacePath, err)
@@ -47,11 +55,19 @@ func PrepareProjection(workspacePath, taskName, taskBranchName, alias, worktreeP
 	if err != nil {
 		return nil, fmt.Errorf("resolve Task Workspace %q: %w", workspacePath, err)
 	}
-	linkPath := filepath.Join(workspacePath, alias)
-	if _, err := os.Lstat(linkPath); err == nil {
-		return nil, fmt.Errorf("%w at %q: Repository Alias path already exists", ErrCollision, linkPath)
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return nil, fmt.Errorf("inspect Task Workspace link %q: %w", linkPath, err)
+	links := make([]projectionLink, 0, len(additions))
+	for _, addition := range additions {
+		linkPath := filepath.Join(workspacePath, addition.Alias)
+		if _, err := os.Lstat(linkPath); err == nil {
+			return nil, fmt.Errorf("%w at %q: Repository Alias path already exists", ErrCollision, linkPath)
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return nil, fmt.Errorf("inspect Task Workspace link %q: %w", linkPath, err)
+		}
+		linkTarget, err := filepath.Rel(canonicalWorkspace, addition.WorktreePath)
+		if err != nil {
+			return nil, fmt.Errorf("calculate Task Workspace link for %q: %w", addition.Alias, err)
+		}
+		links = append(links, projectionLink{path: linkPath, target: linkTarget})
 	}
 	agentsPath := filepath.Join(workspacePath, "AGENTS.md")
 	agentsInfo, err := os.Lstat(agentsPath)
@@ -69,15 +85,10 @@ func PrepareProjection(workspacePath, taskName, taskBranchName, alias, worktreeP
 	if err != nil {
 		return nil, fmt.Errorf("%w at %q: %v", ErrCollision, agentsPath, err)
 	}
-	linkTarget, err := filepath.Rel(canonicalWorkspace, worktreePath)
-	if err != nil {
-		return nil, fmt.Errorf("calculate Task Workspace link for %q: %w", alias, err)
-	}
 	return &Projection{
 		workspacePath: workspacePath,
 		agentsPath:    agentsPath,
-		linkPath:      linkPath,
-		linkTarget:    linkTarget,
+		links:         links,
 		original:      original,
 		updated:       updated,
 		agentsInfo:    agentsInfo,
@@ -96,23 +107,25 @@ func (projection *Projection) Commit() error {
 	if !os.SameFile(projection.agentsInfo, currentInfo) || !bytes.Equal(current, projection.original) {
 		return fmt.Errorf("%w at %q: AGENTS.md changed during add", ErrCollision, projection.agentsPath)
 	}
-	if _, err := os.Lstat(projection.linkPath); err == nil {
-		return fmt.Errorf("%w at %q: Repository Alias path appeared during add", ErrCollision, projection.linkPath)
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("recheck Task Workspace link %q: %w", projection.linkPath, err)
+	for _, link := range projection.links {
+		if _, err := os.Lstat(link.path); err == nil {
+			return fmt.Errorf("%w at %q: Repository Alias path appeared during add", ErrCollision, link.path)
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("recheck Task Workspace link %q: %w", link.path, err)
+		}
 	}
-	if err := os.Symlink(projection.linkTarget, projection.linkPath); err != nil {
-		return fmt.Errorf("create Task Workspace link %q: %w", projection.linkPath, err)
+	for index := range projection.links {
+		link := &projection.links[index]
+		if err := os.Symlink(link.target, link.path); err != nil {
+			return fmt.Errorf("create Task Workspace link %q: %w", link.path, err)
+		}
+		link.created = true
 	}
-	projection.linkCreated = true
 	outcome, err := fileutil.WriteAtomicIfUnchanged(projection.agentsPath, projection.original, projection.updated, 0o600)
 	if err != nil {
 		projection.agentsPublished = outcome.Published
 		if !outcome.Published {
-			if removeError := os.Remove(projection.linkPath); removeError != nil {
-				return errors.Join(fmt.Errorf("update AGENTS.md: %w", err), fmt.Errorf("remove Task Workspace link: %w", removeError))
-			}
-			projection.linkCreated = false
+			return errors.Join(fmt.Errorf("update AGENTS.md: %w", err), projection.removeLinks())
 		}
 		return fmt.Errorf("update AGENTS.md: %w", err)
 	}
@@ -133,7 +146,7 @@ func (projection *Projection) RefreshOwnedContextFiles(files []ContextFile) []Co
 }
 
 func (projection *Projection) Abort() error {
-	if !projection.linkCreated && !projection.agentsPublished {
+	if !projection.hasCreatedLinks() && !projection.agentsPublished {
 		return nil
 	}
 	var failures []error
@@ -147,20 +160,39 @@ func (projection *Projection) Abort() error {
 			projection.agentsPublished = false
 		}
 	}
-	if projection.linkCreated {
-		target, err := os.Readlink(projection.linkPath)
+	failures = append(failures, projection.removeLinks())
+	return errors.Join(failures...)
+}
+
+func (projection *Projection) hasCreatedLinks() bool {
+	for _, link := range projection.links {
+		if link.created {
+			return true
+		}
+	}
+	return false
+}
+
+func (projection *Projection) removeLinks() error {
+	var failures []error
+	for index := len(projection.links) - 1; index >= 0; index-- {
+		link := &projection.links[index]
+		if !link.created {
+			continue
+		}
+		target, err := os.Readlink(link.path)
 		if err != nil {
 			if !errors.Is(err, os.ErrNotExist) {
 				failures = append(failures, fmt.Errorf("inspect Task Workspace link during rollback: %w", err))
 			} else {
-				projection.linkCreated = false
+				link.created = false
 			}
-		} else if target != projection.linkTarget {
-			failures = append(failures, fmt.Errorf("refuse to remove changed Task Workspace link %q", projection.linkPath))
-		} else if err := os.Remove(projection.linkPath); err != nil {
+		} else if target != link.target {
+			failures = append(failures, fmt.Errorf("refuse to remove changed Task Workspace link %q", link.path))
+		} else if err := os.Remove(link.path); err != nil {
 			failures = append(failures, fmt.Errorf("remove Task Workspace link: %w", err))
 		} else {
-			projection.linkCreated = false
+			link.created = false
 		}
 	}
 	return errors.Join(failures...)

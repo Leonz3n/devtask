@@ -209,10 +209,10 @@ func newTaskAddCommand(stdout io.Writer) *cobra.Command {
 	var fetch bool
 	var noFetch bool
 	command := &cobra.Command{
-		Use:   "add <task> <alias>",
-		Short: "Attach a Registered Repository to a Task",
+		Use:   "add <task> <alias>...",
+		Short: "Attach Registered Repositories to a Task",
 		Args: func(cmd *cobra.Command, args []string) error {
-			if err := cobra.ExactArgs(2)(cmd, args); err != nil {
+			if err := cobra.MinimumNArgs(2)(cmd, args); err != nil {
 				return &validationError{err: err}
 			}
 			if cmd.Flags().Changed("fetch") && cmd.Flags().Changed("no-fetch") {
@@ -240,21 +240,25 @@ func newTaskAddCommand(stdout io.Writer) *cobra.Command {
 				override := !noFetch
 				fetchOverride = &override
 			}
-			result, err := task.AddRepository(paths, configuration, args[0], args[1], baseOverride, fetchOverride)
+			results, err := task.AddRepositories(paths, configuration, args[0], args[1:], baseOverride, fetchOverride)
 			if err != nil {
 				return err
 			}
-			action := "attached"
-			if result.AlreadyAttached {
-				action = "already attached"
+			for _, result := range results {
+				action := "attached"
+				if result.AlreadyAttached {
+					action = "already attached"
+				}
+				if _, err = fmt.Fprintf(stdout, "%s %s to Task %s at %s\n", action, result.Attachment.Alias, result.TaskName, result.Attachment.WorktreePath); err != nil {
+					return err
+				}
+				if !result.AlreadyAttached && result.Attachment.BranchExisted {
+					if _, err = fmt.Fprintln(stdout, "existing Task Branch attached; Base Ref was not applied"); err != nil {
+						return err
+					}
+				}
 			}
-			if _, err = fmt.Fprintf(stdout, "%s %s to Task %s at %s\n", action, result.Attachment.Alias, result.TaskName, result.Attachment.WorktreePath); err != nil {
-				return err
-			}
-			if !result.AlreadyAttached && result.Attachment.BranchExisted {
-				_, err = fmt.Fprintln(stdout, "existing Task Branch attached; Base Ref was not applied")
-			}
-			return err
+			return nil
 		},
 	}
 	command.Flags().StringVar(&base, "base", "", "branch name used to resolve the Base Ref for a new Task Branch")

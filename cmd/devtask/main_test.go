@@ -1351,7 +1351,7 @@ func TestAddRecordsIncompleteStateWhenAgentsPublishCannotBeDurablySynced(t *test
 		t.Fatalf("add output = %q, want incomplete projection diagnostic", output)
 	}
 	metadata := readPersistedTask(t, environment, "billing")
-	if metadata.State != "incomplete" || metadata.Incomplete == nil || len(metadata.Attachments) != 1 || metadata.Attachments[0].State != "incomplete" {
+	if metadata.State != "incomplete" || metadata.Incomplete == nil || len(metadata.Attachments) != 0 {
 		t.Fatalf("projection failure metadata = %#v", metadata)
 	}
 	currentAgents, err := os.ReadFile(agentsPath)

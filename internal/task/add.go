@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/Leonz3n/devtask/internal/config"
@@ -23,261 +24,571 @@ type AddResult struct {
 }
 
 func AddRepository(paths config.Paths, configuration config.Config, taskName, repositoryAlias string, baseOverride *string, fetchOverride *bool) (AddResult, error) {
-	if err := ValidateName(taskName); err != nil {
+	results, err := AddRepositories(paths, configuration, taskName, []string{repositoryAlias}, baseOverride, fetchOverride)
+	if err != nil {
 		return AddResult{}, err
+	}
+	return results[0], nil
+}
+
+type addRequest struct {
+	existingIndex int
+	planIndex     int
+}
+
+type addPlan struct {
+	repositoryConfiguration config.RepositoryConfig
+	attachment              RepositoryAttachment
+	branchRef               string
+	branchExisted           bool
+	branchOwned             bool
+	worktreesRootWasAbsent  bool
+	worktreesRootInfo       os.FileInfo
+	excludeChange           *gitcmd.ExcludeUpdate
+	worktreeAttempted       bool
+	worktreeOwned           bool
+	ownedWorktreePath       string
+	ownedWorktreeInfo       os.FileInfo
+	compensationErrors      []error
+}
+
+type repositoryLockTarget struct {
+	path    string
+	aliases []string
+	lock    *lock.File
+}
+
+func AddRepositories(paths config.Paths, configuration config.Config, taskName string, repositoryAliases []string, baseOverride *string, fetchOverride *bool) ([]AddResult, error) {
+	if err := ValidateName(taskName); err != nil {
+		return nil, err
+	}
+	if len(repositoryAliases) == 0 {
+		return nil, invalid("at least one Repository Alias is required")
 	}
 	taskLock, err := lock.Acquire(lockPath(paths, taskName))
 	if err != nil {
 		if errors.Is(err, lock.ErrBusy) {
-			return AddResult{}, fmt.Errorf("Task %q is busy: another devtask process holds its lock", taskName)
+			return nil, fmt.Errorf("Task %q is busy: another devtask process holds its lock", taskName)
 		}
-		return AddResult{}, err
+		return nil, err
 	}
 	defer taskLock.Close()
 
 	metadataPath, originalMetadata, metadata, err := loadForUpdate(paths, taskName)
 	if err != nil {
-		return AddResult{}, err
+		return nil, err
 	}
 	if metadata.State == StateIncomplete {
-		return AddResult{}, invalid("Task %q is incomplete; run status and follow recovery guidance before adding repositories", metadata.Name)
+		return nil, invalid("Task %q is incomplete; run status and follow recovery guidance before adding repositories", metadata.Name)
 	}
-	for _, attachment := range metadata.Attachments {
-		if !strings.EqualFold(attachment.Alias, repositoryAlias) {
+
+	requests := make([]addRequest, 0, len(repositoryAliases))
+	plans := make([]addPlan, 0, len(repositoryAliases))
+	lockTargetsByPath := make(map[string]*repositoryLockTarget)
+	seenAliases := make(map[string]string, len(repositoryAliases))
+	seenWorktrees := make(map[string]string, len(repositoryAliases))
+	for _, requestedAlias := range repositoryAliases {
+		foldedAlias := strings.ToLower(requestedAlias)
+		if previous, duplicate := seenAliases[foldedAlias]; duplicate {
+			return nil, invalid("Repository Alias %q is requested more than once (as %q and %q)", requestedAlias, previous, requestedAlias)
+		}
+		seenAliases[foldedAlias] = requestedAlias
+		existingIndex := -1
+		for index := range metadata.Attachments {
+			if strings.EqualFold(metadata.Attachments[index].Alias, requestedAlias) {
+				existingIndex = index
+				break
+			}
+		}
+		if existingIndex >= 0 {
+			attachment := metadata.Attachments[existingIndex]
+			repositoryLockPath, err := gitcmd.RepositoryLockPath(attachment.MainCheckout)
+			if err != nil {
+				return nil, fmt.Errorf("locate Registered Repository lock for %q: %w", attachment.Alias, err)
+			}
+			addRepositoryLockTarget(lockTargetsByPath, repositoryLockPath, attachment.Alias)
+			requests = append(requests, addRequest{existingIndex: existingIndex, planIndex: -1})
 			continue
 		}
-		if err := verifyExistingAttachment(metadata, attachment, paths); err != nil {
-			return AddResult{}, err
+		alias, repositoryConfiguration, err := findRegisteredRepository(configuration, requestedAlias)
+		if err != nil {
+			return nil, err
 		}
-		return AddResult{TaskName: metadata.Name, Attachment: attachment, AlreadyAttached: true}, nil
-	}
-	alias, repositoryConfiguration, err := findRegisteredRepository(configuration, repositoryAlias)
-	if err != nil {
-		return AddResult{}, err
-	}
-	mainCheckout, err := repo.ResolveMainCheckout(repositoryConfiguration.Path)
-	if err != nil {
-		return AddResult{}, fmt.Errorf("inspect Registered Repository %q: %w", alias, err)
-	}
-	expectedWorktree, err := containedWorktreePath(mainCheckout, metadata.Name)
-	if err != nil {
-		return AddResult{}, err
-	}
-	repositoryLockPath, err := gitcmd.RepositoryLockPath(mainCheckout)
-	if err != nil {
-		return AddResult{}, err
-	}
-	repositoryLock, err := lock.Acquire(repositoryLockPath)
-	if err != nil {
-		if errors.Is(err, lock.ErrBusy) {
-			return AddResult{}, fmt.Errorf("Registered Repository %q is busy: another devtask process holds its lock", alias)
+		mainCheckout, err := repo.ResolveMainCheckout(repositoryConfiguration.Path)
+		if err != nil {
+			return nil, fmt.Errorf("inspect Registered Repository %q: %w", alias, err)
 		}
-		return AddResult{}, err
+		expectedWorktree, err := containedWorktreePath(mainCheckout, metadata.Name)
+		if err != nil {
+			return nil, err
+		}
+		if previousAlias, duplicate := seenWorktrees[expectedWorktree]; duplicate {
+			return nil, invalid("Registered Repositories %q and %q resolve to the same Task Worktree %q", previousAlias, alias, expectedWorktree)
+		}
+		seenWorktrees[expectedWorktree] = alias
+		repositoryLockPath, err := gitcmd.RepositoryLockPath(mainCheckout)
+		if err != nil {
+			return nil, fmt.Errorf("locate Registered Repository lock for %q: %w", alias, err)
+		}
+		addRepositoryLockTarget(lockTargetsByPath, repositoryLockPath, alias)
+		baseBranch := configuration.Defaults.BaseBranch
+		if repositoryConfiguration.BaseBranch != "" {
+			baseBranch = repositoryConfiguration.BaseBranch
+		}
+		if baseOverride != nil {
+			baseBranch = *baseOverride
+		}
+		planIndex := len(plans)
+		plans = append(plans, addPlan{
+			repositoryConfiguration: repositoryConfiguration,
+			attachment: RepositoryAttachment{
+				Alias:          alias,
+				MainCheckout:   mainCheckout,
+				WorktreePath:   expectedWorktree,
+				TaskBranchName: metadata.TaskBranchName,
+				BaseBranch:     baseBranch,
+				Order:          len(metadata.Attachments) + planIndex,
+				ManagedLinks:   make([]workspace.ManagedLink, 0),
+				State:          StateReady,
+			},
+			branchRef: "refs/heads/" + metadata.TaskBranchName,
+		})
+		requests = append(requests, addRequest{existingIndex: -1, planIndex: planIndex})
 	}
-	defer repositoryLock.Close()
 
-	baseBranch := configuration.Defaults.BaseBranch
-	if repositoryConfiguration.BaseBranch != "" {
-		baseBranch = repositoryConfiguration.BaseBranch
+	lockTargets := make([]*repositoryLockTarget, 0, len(lockTargetsByPath))
+	for _, target := range lockTargetsByPath {
+		lockTargets = append(lockTargets, target)
 	}
-	if baseOverride != nil {
-		baseBranch = *baseOverride
+	sort.Slice(lockTargets, func(i, j int) bool { return lockTargets[i].path < lockTargets[j].path })
+	for _, target := range lockTargets {
+		target.lock, err = lock.Acquire(target.path)
+		if err != nil {
+			closeRepositoryLocks(lockTargets)
+			if errors.Is(err, lock.ErrBusy) {
+				return nil, fmt.Errorf("Registered Repository %q is busy: another devtask process holds its lock", strings.Join(target.aliases, ", "))
+			}
+			return nil, err
+		}
 	}
-	branchRef := "refs/heads/" + metadata.TaskBranchName
-	branchExisted, err := gitcmd.RefExists(mainCheckout, branchRef)
-	if err != nil {
-		return AddResult{}, fmt.Errorf("inspect Task Branch Name %q in repository %q: %w", metadata.TaskBranchName, alias, err)
+	defer closeRepositoryLocks(lockTargets)
+	lockPaths := make([]string, len(lockTargets))
+	for index, target := range lockTargets {
+		lockPaths[index] = target.path
 	}
-	if branchExisted {
-		if owner, err := gitcmd.WorktreeForBranch(mainCheckout, branchRef); err == nil {
-			detail := owner.Path
-			if owner.Prunable {
+	if err := afterRepositoryLocksForTest(lockPaths); err != nil {
+		return nil, fmt.Errorf("record Registered Repository lock acquisition: %w", err)
+	}
+
+	for _, request := range requests {
+		if request.existingIndex >= 0 {
+			if err := verifyExistingAttachment(metadata, metadata.Attachments[request.existingIndex], paths); err != nil {
+				return nil, err
+			}
+		}
+	}
+	if len(plans) == 0 {
+		results := make([]AddResult, 0, len(requests))
+		for _, request := range requests {
+			results = append(results, AddResult{TaskName: metadata.Name, Attachment: metadata.Attachments[request.existingIndex], AlreadyAttached: true})
+		}
+		return results, nil
+	}
+	for index := range plans {
+		plan := &plans[index]
+		plan.branchExisted, err = gitcmd.RefExists(plan.attachment.MainCheckout, plan.branchRef)
+		if err != nil {
+			return nil, fmt.Errorf("inspect Task Branch Name %q in repository %q: %w", metadata.TaskBranchName, plan.attachment.Alias, err)
+		}
+		plan.attachment.BranchExisted = plan.branchExisted
+		if plan.branchExisted {
+			if owner, ownerError := gitcmd.WorktreeForBranch(plan.attachment.MainCheckout, plan.branchRef); ownerError == nil {
+				detail := owner.Path
+				if owner.Prunable {
+					detail += " (prunable)"
+				}
+				return nil, invalid("Task Branch Name %q is already assigned to Git worktree %q; refusing to prune or steal it", metadata.TaskBranchName, detail)
+			} else if !errors.Is(ownerError, gitcmd.ErrWorktreeRecordNotFound) {
+				return nil, fmt.Errorf("inspect Task Branch Name ownership in repository %q: %w", plan.attachment.Alias, ownerError)
+			}
+		}
+		plan.worktreesRootWasAbsent, err = preflightWorktreeRoot(filepath.Dir(plan.attachment.WorktreePath))
+		if err != nil {
+			return nil, err
+		}
+		if _, pathError := os.Lstat(plan.attachment.WorktreePath); pathError == nil {
+			return nil, invalid("Task Worktree collision at %q", plan.attachment.WorktreePath)
+		} else if !errors.Is(pathError, os.ErrNotExist) {
+			return nil, fmt.Errorf("inspect Task Worktree path %q: %w", plan.attachment.WorktreePath, pathError)
+		}
+		if record, recordError := gitcmd.WorktreeAt(plan.attachment.MainCheckout, plan.attachment.WorktreePath); recordError == nil {
+			detail := record.BranchRef
+			if record.Prunable {
 				detail += " (prunable)"
 			}
-			return AddResult{}, invalid("Task Branch Name %q is already assigned to Git worktree %q; refusing to prune or steal it", metadata.TaskBranchName, detail)
-		} else if !errors.Is(err, gitcmd.ErrWorktreeRecordNotFound) {
-			return AddResult{}, fmt.Errorf("inspect Task Branch Name ownership in repository %q: %w", alias, err)
+			return nil, invalid("Git worktree record collision at %q: %s", plan.attachment.WorktreePath, strings.TrimSpace(detail))
+		} else if !errors.Is(recordError, gitcmd.ErrWorktreeRecordNotFound) {
+			return nil, fmt.Errorf("inspect Git worktree ownership for %q: %w", plan.attachment.WorktreePath, recordError)
 		}
 	}
-	worktreesRoot := filepath.Dir(expectedWorktree)
-	rootCreated, err := preflightWorktreeRoot(worktreesRoot)
-	if err != nil {
-		return AddResult{}, err
-	}
-	if _, err := os.Lstat(expectedWorktree); err == nil {
-		return AddResult{}, invalid("Task Worktree collision at %q", expectedWorktree)
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return AddResult{}, fmt.Errorf("inspect Task Worktree path %q: %w", expectedWorktree, err)
-	}
-	if record, err := gitcmd.WorktreeAt(mainCheckout, expectedWorktree); err == nil {
-		detail := record.BranchRef
-		if record.Prunable {
-			detail += " (prunable)"
-		}
-		return AddResult{}, invalid("Git worktree record collision at %q: %s", expectedWorktree, strings.TrimSpace(detail))
-	} else if !errors.Is(err, gitcmd.ErrWorktreeRecordNotFound) {
-		return AddResult{}, fmt.Errorf("inspect Git worktree ownership for %q: %w", expectedWorktree, err)
-	}
+
 	workspacePath := filepath.Join(paths.Workspaces, metadata.Name)
-	projectionAttachments := make([]workspace.Attachment, 0, len(metadata.Attachments)+1)
+	projectionAdditions := make([]workspace.Attachment, 0, len(plans))
+	projectionAttachments := make([]workspace.Attachment, 0, len(metadata.Attachments)+len(plans))
 	for _, attachment := range metadata.Attachments {
 		projectionAttachments = append(projectionAttachments, workspace.Attachment{Alias: attachment.Alias, WorktreePath: attachment.WorktreePath})
 	}
-	projectionAttachments = append(projectionAttachments, workspace.Attachment{Alias: alias, WorktreePath: expectedWorktree})
-	projection, err := workspace.PrepareProjection(workspacePath, metadata.Name, metadata.TaskBranchName, alias, expectedWorktree, projectionAttachments)
-	if err != nil {
-		if errors.Is(err, workspace.ErrCollision) {
-			return AddResult{}, invalid("%v", err)
-		}
-		return AddResult{}, err
+	for _, plan := range plans {
+		addition := workspace.Attachment{Alias: plan.attachment.Alias, WorktreePath: plan.attachment.WorktreePath}
+		projectionAdditions = append(projectionAdditions, addition)
+		projectionAttachments = append(projectionAttachments, addition)
 	}
-	baseRef := ""
-	baseCommit := ""
-	if !branchExisted {
-		if strings.TrimSpace(baseBranch) == "" {
-			return AddResult{}, invalid("Base Ref for repository %q must be a non-empty branch name", alias)
+	var projection *workspace.Projection
+	if len(plans) > 0 {
+		projection, err = workspace.PrepareProjectionBatch(workspacePath, metadata.Name, metadata.TaskBranchName, projectionAdditions, projectionAttachments)
+		if err != nil {
+			if errors.Is(err, workspace.ErrCollision) {
+				return nil, invalid("%v", err)
+			}
+			return nil, err
 		}
-		if err := gitcmd.ValidateBranchName(baseBranch); err != nil {
-			return AddResult{}, invalid("invalid Base Ref for repository %q: %v", alias, err)
+	}
+
+	for index := range plans {
+		plan := &plans[index]
+		if plan.branchExisted {
+			continue
+		}
+		if strings.TrimSpace(plan.attachment.BaseBranch) == "" {
+			return nil, invalid("Base Ref for repository %q must be a non-empty branch name", plan.attachment.Alias)
+		}
+		if err := gitcmd.ValidateBranchName(plan.attachment.BaseBranch); err != nil {
+			return nil, invalid("invalid Base Ref for repository %q: %v", plan.attachment.Alias, err)
+		}
+	}
+	for index := range plans {
+		plan := &plans[index]
+		if plan.branchExisted {
+			continue
 		}
 		remote := configuration.Defaults.Remote
-		if repositoryConfiguration.Remote != "" {
-			remote = repositoryConfiguration.Remote
+		if plan.repositoryConfiguration.Remote != "" {
+			remote = plan.repositoryConfiguration.Remote
 		}
 		fetch := configuration.Defaults.Fetch
-		if repositoryConfiguration.Fetch != nil {
-			fetch = *repositoryConfiguration.Fetch
+		if plan.repositoryConfiguration.Fetch != nil {
+			fetch = *plan.repositoryConfiguration.Fetch
 		}
 		if fetchOverride != nil {
 			fetch = *fetchOverride
 		}
-		resolvedBaseRef, err := gitcmd.ResolveBaseRef(mainCheckout, baseBranch, remote, fetch)
-		if err != nil {
-			if errors.Is(err, gitcmd.ErrBaseRefNotFound) {
-				return AddResult{}, invalid("Base Ref %q for repository %q does not exist: %v", baseBranch, alias, err)
+		resolvedBaseRef, resolveError := gitcmd.ResolveBaseRef(plan.attachment.MainCheckout, plan.attachment.BaseBranch, remote, fetch)
+		if resolveError != nil {
+			if errors.Is(resolveError, gitcmd.ErrBaseRefNotFound) {
+				return nil, invalid("Base Ref %q for repository %q does not exist: %v", plan.attachment.BaseBranch, plan.attachment.Alias, resolveError)
 			}
-			return AddResult{}, fmt.Errorf("resolve Base Ref %q for repository %q: %w", baseBranch, alias, err)
+			return nil, fmt.Errorf("resolve Base Ref %q for repository %q: %w", plan.attachment.BaseBranch, plan.attachment.Alias, resolveError)
 		}
-		baseRef = resolvedBaseRef.Ref
-		baseCommit = resolvedBaseRef.Commit
+		plan.attachment.BaseRef = resolvedBaseRef.Ref
+		plan.attachment.BaseCommit = resolvedBaseRef.Commit
 	}
-	attachment := RepositoryAttachment{
-		Alias:          alias,
-		MainCheckout:   mainCheckout,
-		WorktreePath:   expectedWorktree,
-		TaskBranchName: metadata.TaskBranchName,
-		BaseBranch:     baseBranch,
-		BaseRef:        baseRef,
-		BaseCommit:     baseCommit,
-		Order:          len(metadata.Attachments),
-		BranchExisted:  branchExisted,
-		ManagedLinks:   make([]workspace.ManagedLink, 0),
-		State:          StateReady,
+	for index := range plans {
+		plans[index].excludeChange, err = gitcmd.PrepareWorktreesIgnored(plans[index].attachment.MainCheckout)
+		if err != nil {
+			return nil, fmt.Errorf("prepare Task Worktree for repository %q: %w", plans[index].attachment.Alias, err)
+		}
 	}
 
-	excludeChange, err := gitcmd.EnsureWorktreesIgnored(mainCheckout)
-	if err != nil {
-		return AddResult{}, err
-	}
-	rollback := func(cause error, cleanGitObjects bool) error {
+	rollback := func(cause error) error {
 		var rollbackErrors []error
-		rollbackErrors = append(rollbackErrors, projection.Abort())
-		if cleanGitObjects {
-			if _, recordError := gitcmd.WorktreeAt(mainCheckout, expectedWorktree); recordError == nil {
-				if removeError := gitcmd.RemoveWorktree(mainCheckout, expectedWorktree); removeError != nil {
-					rollbackErrors = append(rollbackErrors, fmt.Errorf("remove Task Worktree: %w", removeError))
+		if projection != nil {
+			rollbackErrors = append(rollbackErrors, projection.Abort())
+		}
+		for index := len(plans) - 1; index >= 0; index-- {
+			plan := &plans[index]
+			beforeCompensationForTest(plan.attachment.Alias)
+			rollbackErrors = append(rollbackErrors, plan.compensationErrors...)
+			recordPlanError := func(err error) {
+				if err != nil {
+					plan.compensationErrors = append(plan.compensationErrors, err)
+					rollbackErrors = append(rollbackErrors, err)
 				}
-			} else if errors.Is(recordError, gitcmd.ErrWorktreeRecordNotFound) {
-				if _, pathError := os.Lstat(expectedWorktree); pathError == nil {
-					rollbackErrors = append(rollbackErrors, fmt.Errorf("unregistered Task Worktree path remains at %q; refuse automatic removal", expectedWorktree))
+			}
+			if plan.worktreeOwned {
+				if record, recordError := gitcmd.WorktreeAt(plan.attachment.MainCheckout, plan.ownedWorktreePath); recordError == nil {
+					if record.BranchRef != plan.branchRef {
+						recordPlanError(fmt.Errorf("refuse to remove changed Task Worktree record for repository %q: expected Task Branch Name ref %q, found %q", plan.attachment.Alias, plan.branchRef, record.BranchRef))
+					} else if currentInfo, pathError := os.Lstat(plan.ownedWorktreePath); pathError != nil {
+						recordPlanError(fmt.Errorf("inspect owned Task Worktree path for repository %q before removal: %w", plan.attachment.Alias, pathError))
+					} else if plan.ownedWorktreeInfo == nil || !os.SameFile(plan.ownedWorktreeInfo, currentInfo) {
+						recordPlanError(fmt.Errorf("refuse to remove changed Task Worktree path %q", plan.ownedWorktreePath))
+					} else if removeError := gitcmd.RemoveWorktree(plan.attachment.MainCheckout, plan.ownedWorktreePath); removeError != nil {
+						recordPlanError(fmt.Errorf("remove Task Worktree for repository %q: %w", plan.attachment.Alias, removeError))
+					}
+				} else if errors.Is(recordError, gitcmd.ErrWorktreeRecordNotFound) {
+					if currentInfo, pathError := os.Lstat(plan.ownedWorktreePath); pathError == nil {
+						if plan.ownedWorktreeInfo == nil || !os.SameFile(plan.ownedWorktreeInfo, currentInfo) {
+							recordPlanError(fmt.Errorf("unregistered Task Worktree path changed at %q; refuse automatic removal", plan.ownedWorktreePath))
+						} else if removeError := os.Remove(plan.ownedWorktreePath); removeError != nil {
+							recordPlanError(fmt.Errorf("remove empty unregistered Task Worktree path %q: %w", plan.ownedWorktreePath, removeError))
+						}
+					} else if !errors.Is(pathError, os.ErrNotExist) {
+						recordPlanError(fmt.Errorf("inspect failed Task Worktree path for repository %q: %w", plan.attachment.Alias, pathError))
+					}
+				} else {
+					recordPlanError(fmt.Errorf("inspect Task Worktree record during rollback for repository %q: %w", plan.attachment.Alias, recordError))
+				}
+			} else if plan.worktreeAttempted {
+				if record, recordError := gitcmd.WorktreeAt(plan.attachment.MainCheckout, plan.attachment.WorktreePath); recordError == nil {
+					recordPlanError(fmt.Errorf("refuse to remove unowned Git worktree record at %q on %q", record.Path, record.BranchRef))
+				} else if !errors.Is(recordError, gitcmd.ErrWorktreeRecordNotFound) {
+					recordPlanError(fmt.Errorf("inspect possible Task Worktree residual for repository %q: %w", plan.attachment.Alias, recordError))
+				}
+				if _, pathError := os.Lstat(plan.attachment.WorktreePath); pathError == nil {
+					recordPlanError(fmt.Errorf("unowned Task Worktree path remains at %q; refuse automatic removal", plan.attachment.WorktreePath))
 				} else if !errors.Is(pathError, os.ErrNotExist) {
-					rollbackErrors = append(rollbackErrors, fmt.Errorf("inspect failed Task Worktree path: %w", pathError))
+					recordPlanError(fmt.Errorf("inspect possible Task Worktree path residual for repository %q: %w", plan.attachment.Alias, pathError))
 				}
-			} else {
-				rollbackErrors = append(rollbackErrors, fmt.Errorf("inspect Task Worktree record during rollback: %w", recordError))
-			}
-			if exists, branchError := gitcmd.RefExists(mainCheckout, branchRef); branchError != nil {
-				rollbackErrors = append(rollbackErrors, fmt.Errorf("inspect Task Branch Name during rollback: %w", branchError))
-			} else if exists && !branchExisted {
-				if deleteError := gitcmd.DeleteBranch(mainCheckout, metadata.TaskBranchName); deleteError != nil {
-					rollbackErrors = append(rollbackErrors, fmt.Errorf("delete Task Branch Name: %w", deleteError))
+				if exists, branchError := gitcmd.RefExists(plan.attachment.MainCheckout, plan.branchRef); branchError != nil {
+					recordPlanError(fmt.Errorf("inspect possible Task Branch Name residual for repository %q: %w", plan.attachment.Alias, branchError))
+				} else if exists && !plan.branchExisted && !plan.branchOwned {
+					recordPlanError(fmt.Errorf("unowned Task Branch Name %q remains in repository %q; refuse automatic deletion", metadata.TaskBranchName, plan.attachment.Alias))
 				}
 			}
-		}
-		if rootCreated {
-			if removeError := os.Remove(worktreesRoot); removeError != nil && !errors.Is(removeError, os.ErrNotExist) {
-				rollbackErrors = append(rollbackErrors, fmt.Errorf("remove empty worktrees directory: %w", removeError))
+			if plan.branchOwned {
+				if exists, branchError := gitcmd.RefExists(plan.attachment.MainCheckout, plan.branchRef); branchError != nil {
+					recordPlanError(fmt.Errorf("inspect Task Branch Name during rollback for repository %q: %w", plan.attachment.Alias, branchError))
+				} else if exists {
+					if owner, ownerError := gitcmd.WorktreeForBranch(plan.attachment.MainCheckout, plan.branchRef); ownerError == nil {
+						recordPlanError(fmt.Errorf("refuse to delete Task Branch Name for repository %q because it is assigned to Git worktree %q", plan.attachment.Alias, owner.Path))
+					} else if !errors.Is(ownerError, gitcmd.ErrWorktreeRecordNotFound) {
+						recordPlanError(fmt.Errorf("inspect Task Branch Name ownership during rollback for repository %q: %w", plan.attachment.Alias, ownerError))
+					} else if deleteError := gitcmd.DeleteBranch(plan.attachment.MainCheckout, metadata.TaskBranchName); deleteError != nil {
+						recordPlanError(fmt.Errorf("delete Task Branch Name for repository %q: %w", plan.attachment.Alias, deleteError))
+					}
+				}
 			}
+			if plan.worktreesRootInfo != nil {
+				worktreesRoot := filepath.Dir(plan.attachment.WorktreePath)
+				if currentInfo, inspectError := os.Lstat(worktreesRoot); inspectError == nil {
+					if !os.SameFile(plan.worktreesRootInfo, currentInfo) {
+						recordPlanError(fmt.Errorf("refuse to remove changed worktrees directory for repository %q", plan.attachment.Alias))
+					} else if removeError := os.Remove(worktreesRoot); removeError != nil && !errors.Is(removeError, os.ErrNotExist) {
+						recordPlanError(fmt.Errorf("remove empty worktrees directory for repository %q: %w", plan.attachment.Alias, removeError))
+					}
+				} else if !errors.Is(inspectError, os.ErrNotExist) {
+					recordPlanError(fmt.Errorf("inspect worktrees directory during rollback for repository %q: %w", plan.attachment.Alias, inspectError))
+				}
+			}
+			recordPlanError(plan.excludeChange.Abort())
+			recordPlanError(recordCompensationForTest(plan.attachment.Alias))
 		}
-		rollbackErrors = append(rollbackErrors, excludeChange.Abort())
 		if joined := errors.Join(rollbackErrors...); joined != nil {
-			residuals := observeResidualObjects(metadata.Name, attachment, paths, joined)
-			if persistError := persistIncompleteAttachment(metadataPath, attachment, cause, joined, residuals); persistError != nil {
-				return fmt.Errorf("%v; roll back Repository Attachment: %v; persist incomplete state: %w", cause, joined, persistError)
+			incompleteAttachments, residuals := observeResidualAttachments(metadata.Name, plans, paths, cause, joined)
+			if persistError := persistIncompleteAttachments(metadataPath, incompleteAttachments, cause, joined, residuals); persistError != nil {
+				return fmt.Errorf("%v; roll back Repository Attachments: %v; persist incomplete state: %w", cause, joined, persistError)
 			}
-			return fmt.Errorf("%v; roll back Repository Attachment: %v; Task %q is incomplete with residual state; run status and follow recovery guidance", cause, joined, metadata.Name)
+			return fmt.Errorf("%v; roll back Repository Attachments: %v; Task %q is incomplete with residual state; run status and follow recovery guidance", cause, joined, metadata.Name)
 		}
 		return cause
 	}
 
-	createWorktree := func() error {
-		if branchExisted {
-			return gitcmd.AttachWorktree(mainCheckout, expectedWorktree, metadata.TaskBranchName)
+	for index := range plans {
+		if err := plans[index].excludeChange.Commit(); err != nil {
+			return nil, rollback(fmt.Errorf("prepare Task Worktree for repository %q: %w", plans[index].attachment.Alias, err))
 		}
-		return gitcmd.CreateWorktree(mainCheckout, expectedWorktree, metadata.TaskBranchName, baseRef)
+		if err := afterExcludeForTest(plans[index].attachment.Alias); err != nil {
+			return nil, rollback(err)
+		}
 	}
-	if err := createWorktree(); err != nil {
-		return AddResult{}, rollback(fmt.Errorf("create Task Worktree for repository %q: %w", alias, err), true)
+	for index := range plans {
+		plan := &plans[index]
+		if rootError := plan.createWorktreesRoot(); rootError != nil {
+			return nil, rollback(rootError)
+		}
+		if !plan.branchExisted {
+			if err := gitcmd.CreateBranch(plan.attachment.MainCheckout, metadata.TaskBranchName, plan.attachment.BaseRef); err != nil {
+				return nil, rollback(fmt.Errorf("create Task Branch Name for repository %q: %w", plan.attachment.Alias, err))
+			}
+			plan.branchOwned = true
+		}
+		if stageError := plan.createOwnedWorktreeStage(); stageError != nil {
+			return nil, rollback(stageError)
+		}
+		plan.worktreeAttempted = true
+		err = gitcmd.AttachWorktree(plan.attachment.MainCheckout, plan.ownedWorktreePath, metadata.TaskBranchName)
+		if err != nil {
+			return nil, rollback(fmt.Errorf("create Task Worktree for repository %q: %w", plan.attachment.Alias, err))
+		}
+		beforeWorktreeMoveForTest(plan.attachment.Alias)
+		if moveError := gitcmd.MoveWorktree(plan.attachment.MainCheckout, plan.ownedWorktreePath, plan.attachment.WorktreePath); moveError != nil {
+			return nil, rollback(fmt.Errorf("move Task Worktree into place for repository %q: %w", plan.attachment.Alias, moveError))
+		}
+		owner, ownerError := gitcmd.WorktreeForBranch(plan.attachment.MainCheckout, plan.branchRef)
+		if ownerError != nil {
+			return nil, rollback(fmt.Errorf("locate moved Task Worktree for repository %q: %w", plan.attachment.Alias, ownerError))
+		}
+		plan.ownedWorktreePath = owner.Path
+		if movedInfo, movedError := os.Lstat(plan.ownedWorktreePath); movedError != nil {
+			return nil, rollback(fmt.Errorf("inspect moved Task Worktree for repository %q: %w", plan.attachment.Alias, movedError))
+		} else if !os.SameFile(plan.ownedWorktreeInfo, movedInfo) {
+			return nil, rollback(fmt.Errorf("moved Task Worktree for repository %q changed identity", plan.attachment.Alias))
+		}
+		if filepath.Clean(plan.ownedWorktreePath) != filepath.Clean(plan.attachment.WorktreePath) {
+			return nil, rollback(fmt.Errorf("move Task Worktree for repository %q selected unexpected destination %q", plan.attachment.Alias, plan.ownedWorktreePath))
+		}
+		canonicalWorktree, resolveError := filepath.EvalSymlinks(plan.attachment.WorktreePath)
+		if resolveError != nil {
+			return nil, rollback(fmt.Errorf("resolve created Task Worktree for repository %q: %w", plan.attachment.Alias, resolveError))
+		}
+		if canonicalWorktree != plan.attachment.WorktreePath {
+			return nil, rollback(fmt.Errorf("created Task Worktree for repository %q resolved outside its expected path: %q", plan.attachment.Alias, canonicalWorktree))
+		}
+		plan.attachment.WorktreePath = canonicalWorktree
+		if err := afterWorktreeForTest(plan.attachment.Alias); err != nil {
+			return nil, rollback(err)
+		}
 	}
-	canonicalWorktree, err := filepath.EvalSymlinks(expectedWorktree)
-	if err != nil {
-		return AddResult{}, rollback(fmt.Errorf("resolve created Task Worktree: %w", err), true)
+	if projection != nil {
+		if err := projection.Commit(); err != nil {
+			return nil, rollback(err)
+		}
+		if err := afterProjectionForTest(); err != nil {
+			return nil, rollback(err)
+		}
 	}
-	if canonicalWorktree != expectedWorktree {
-		return AddResult{}, rollback(fmt.Errorf("created Task Worktree resolved outside its expected path: %q", canonicalWorktree), true)
+	for _, plan := range plans {
+		metadata.Attachments = append(metadata.Attachments, plan.attachment)
 	}
-	if err := projection.Commit(); err != nil {
-		return AddResult{}, rollback(err, true)
+	if projection != nil {
+		metadata.ContextFiles = projection.RefreshOwnedContextFiles(metadata.ContextFiles)
 	}
-	if err := afterProjectionForTest(); err != nil {
-		return AddResult{}, rollback(err, true)
-	}
-	attachment.WorktreePath = canonicalWorktree
-	metadata.Attachments = append(metadata.Attachments, attachment)
-	metadata.ContextFiles = projection.RefreshOwnedContextFiles(metadata.ContextFiles)
 	updatedMetadata, err := yaml.Marshal(metadata)
 	if err != nil {
-		return AddResult{}, rollback(fmt.Errorf("encode Task metadata: %w", err), true)
+		return nil, rollback(fmt.Errorf("encode Task metadata: %w", err))
 	}
 	outcome, err := fileutil.WriteAtomicIfUnchanged(metadataPath, originalMetadata, updatedMetadata, 0o600)
 	if err != nil {
 		if outcome.Published {
-			return AddResult{}, fmt.Errorf("Repository Attachment for %q was published but its Task metadata could not be durably synced: %w; inspect the Task before retrying", alias, err)
+			return nil, fmt.Errorf("Repository Attachment metadata was published but could not be durably synced: %w; inspect the Task before retrying", err)
 		}
-		return AddResult{}, rollback(fmt.Errorf("update Task metadata: %w", err), true)
+		return nil, rollback(fmt.Errorf("update Task metadata: %w", err))
 	}
-	return AddResult{TaskName: metadata.Name, Attachment: attachment}, nil
+	results := make([]AddResult, 0, len(requests))
+	for _, request := range requests {
+		if request.existingIndex >= 0 {
+			results = append(results, AddResult{TaskName: metadata.Name, Attachment: metadata.Attachments[request.existingIndex], AlreadyAttached: true})
+		} else {
+			results = append(results, AddResult{TaskName: metadata.Name, Attachment: plans[request.planIndex].attachment})
+		}
+	}
+	return results, nil
 }
 
-func observeResidualObjects(taskName string, attachment RepositoryAttachment, paths config.Paths, rollbackError error) []string {
-	residuals := []string{"rollback error: " + rollbackError.Error()}
-	if _, err := os.Lstat(attachment.WorktreePath); err == nil {
-		residuals = append(residuals, "Task Worktree path remains: "+attachment.WorktreePath)
+func addRepositoryLockTarget(targets map[string]*repositoryLockTarget, path, alias string) {
+	if existing := targets[path]; existing != nil {
+		existing.aliases = append(existing.aliases, alias)
+		return
 	}
-	if record, err := gitcmd.WorktreeAt(attachment.MainCheckout, attachment.WorktreePath); err == nil {
-		residuals = append(residuals, "Git worktree record remains: "+record.Path)
-	}
-	if exists, err := gitcmd.RefExists(attachment.MainCheckout, "refs/heads/"+attachment.TaskBranchName); err == nil && exists {
-		residuals = append(residuals, "Task Branch Name remains: "+attachment.TaskBranchName)
-	}
-	linkPath := filepath.Join(paths.Workspaces, taskName, attachment.Alias)
-	if _, err := os.Lstat(linkPath); err == nil {
-		residuals = append(residuals, "Task Workspace entry remains: "+linkPath)
-	}
-	return residuals
+	targets[path] = &repositoryLockTarget{path: path, aliases: []string{alias}}
 }
 
-func persistIncompleteAttachment(metadataPath string, attachment RepositoryAttachment, cause, rollbackError error, residuals []string) error {
+func closeRepositoryLocks(targets []*repositoryLockTarget) {
+	for index := len(targets) - 1; index >= 0; index-- {
+		if targets[index].lock != nil {
+			_ = targets[index].lock.Close()
+			targets[index].lock = nil
+		}
+	}
+}
+
+func (plan *addPlan) createWorktreesRoot() error {
+	if !plan.worktreesRootWasAbsent {
+		return nil
+	}
+	worktreesRoot := filepath.Dir(plan.attachment.WorktreePath)
+	if err := os.Mkdir(worktreesRoot, 0o700); err != nil {
+		return fmt.Errorf("create worktrees directory for repository %q: %w", plan.attachment.Alias, err)
+	}
+	info, err := os.Lstat(worktreesRoot)
+	if err != nil {
+		return fmt.Errorf("inspect created worktrees directory for repository %q: %w", plan.attachment.Alias, err)
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("created worktrees path %q is not a real directory", worktreesRoot)
+	}
+	plan.worktreesRootInfo = info
+	return nil
+}
+
+func (plan *addPlan) createOwnedWorktreeStage() error {
+	worktreesRoot := filepath.Dir(plan.attachment.WorktreePath)
+	stagePath, err := os.MkdirTemp(worktreesRoot, ".devtask-worktree-")
+	if err != nil {
+		return fmt.Errorf("create Task Worktree staging directory for repository %q: %w", plan.attachment.Alias, err)
+	}
+	info, err := os.Lstat(stagePath)
+	if err != nil {
+		_ = os.Remove(stagePath)
+		return fmt.Errorf("inspect Task Worktree staging directory for repository %q: %w", plan.attachment.Alias, err)
+	}
+	plan.worktreeOwned = true
+	plan.ownedWorktreePath = stagePath
+	plan.ownedWorktreeInfo = info
+	return nil
+}
+
+func observeResidualAttachments(taskName string, plans []addPlan, paths config.Paths, cause, rollbackError error) ([]RepositoryAttachment, []string) {
+	operationResiduals := []string{"rollback error: " + rollbackError.Error()}
+	incomplete := make([]RepositoryAttachment, 0, len(plans))
+	for _, plan := range plans {
+		attachment := plan.attachment
+		attachmentResiduals := make([]string, 0, 6)
+		for _, compensationError := range plan.compensationErrors {
+			attachmentResiduals = append(attachmentResiduals, "compensation error: "+compensationError.Error())
+		}
+		if _, err := os.Lstat(attachment.WorktreePath); err == nil {
+			attachmentResiduals = append(attachmentResiduals, "Task Worktree path remains: "+attachment.WorktreePath)
+		}
+		if record, err := gitcmd.WorktreeAt(attachment.MainCheckout, attachment.WorktreePath); err == nil {
+			attachmentResiduals = append(attachmentResiduals, "Git worktree record remains: "+record.Path)
+		}
+		if plan.ownedWorktreePath != "" && plan.ownedWorktreePath != attachment.WorktreePath {
+			if _, err := os.Lstat(plan.ownedWorktreePath); err == nil {
+				attachmentResiduals = append(attachmentResiduals, "Task Worktree staging path remains: "+plan.ownedWorktreePath)
+			}
+			if record, err := gitcmd.WorktreeAt(attachment.MainCheckout, plan.ownedWorktreePath); err == nil {
+				attachmentResiduals = append(attachmentResiduals, "Git worktree staging record remains: "+record.Path)
+			}
+		}
+		if !plan.branchExisted {
+			if exists, err := gitcmd.RefExists(attachment.MainCheckout, "refs/heads/"+attachment.TaskBranchName); err == nil && exists {
+				attachmentResiduals = append(attachmentResiduals, "Task Branch Name remains: "+attachment.TaskBranchName)
+			}
+		}
+		linkPath := filepath.Join(paths.Workspaces, taskName, attachment.Alias)
+		if _, err := os.Lstat(linkPath); err == nil {
+			attachmentResiduals = append(attachmentResiduals, "Task Workspace entry remains: "+linkPath)
+		}
+		if plan.worktreesRootWasAbsent {
+			worktreesRoot := filepath.Dir(attachment.WorktreePath)
+			if _, err := os.Lstat(worktreesRoot); err == nil {
+				attachmentResiduals = append(attachmentResiduals, "worktrees directory remains: "+worktreesRoot)
+			}
+		}
+		if len(attachmentResiduals) == 0 {
+			continue
+		}
+		attachment.State = StateIncomplete
+		attachment.LastError = cause.Error()
+		attachment.ResidualObjects = attachmentResiduals
+		incomplete = append(incomplete, attachment)
+		operationResiduals = append(operationResiduals, attachmentResiduals...)
+	}
+	return incomplete, operationResiduals
+}
+
+func persistIncompleteAttachments(metadataPath string, attachments []RepositoryAttachment, cause, rollbackError error, residuals []string) error {
 	current, err := os.ReadFile(metadataPath)
 	if err != nil {
 		return err
@@ -286,11 +597,8 @@ func persistIncompleteAttachment(metadataPath string, attachment RepositoryAttac
 	if err != nil {
 		return err
 	}
-	attachment.State = StateIncomplete
-	attachment.LastError = cause.Error()
-	attachment.ResidualObjects = residuals
 	metadata.State = StateIncomplete
-	metadata.Attachments = append(metadata.Attachments, attachment)
+	metadata.Attachments = append(metadata.Attachments, attachments...)
 	metadata.Incomplete = &IncompleteOperation{
 		Operation:       "add_repository",
 		LastError:       cause.Error() + "; rollback: " + rollbackError.Error(),

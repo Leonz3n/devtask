@@ -18,9 +18,10 @@ type WorktreeRecord struct {
 }
 
 type ExcludeUpdate struct {
-	path     string
-	original []byte
-	updated  []byte
+	path      string
+	original  []byte
+	updated   []byte
+	published bool
 }
 
 func RepositoryLockPath(mainCheckout string) (string, error) {
@@ -97,6 +98,17 @@ func WorktreeForBranch(mainCheckout, branchRef string) (WorktreeRecord, error) {
 }
 
 func EnsureWorktreesIgnored(mainCheckout string) (*ExcludeUpdate, error) {
+	update, err := PrepareWorktreesIgnored(mainCheckout)
+	if err != nil {
+		return nil, err
+	}
+	if err := update.Commit(); err != nil {
+		return update, err
+	}
+	return update, nil
+}
+
+func PrepareWorktreesIgnored(mainCheckout string) (*ExcludeUpdate, error) {
 	ignored, err := RunPredicate(mainCheckout, "check-ignore", "--no-index", "--quiet", ".worktrees/.devtask-probe")
 	if err != nil {
 		return nil, fmt.Errorf("check effective ignore for .worktrees: %w", err)
@@ -120,27 +132,42 @@ func EnsureWorktreesIgnored(mainCheckout string) (*ExcludeUpdate, error) {
 	if len(original) > 0 && original[len(original)-1] != '\n' {
 		addition = append([]byte{'\n'}, addition...)
 	}
-	file, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0)
-	if err != nil {
-		return nil, fmt.Errorf("open common local Git exclude %q: %w", path, err)
-	}
-	if _, err := file.Write(addition); err != nil {
-		_ = file.Close()
-		return nil, fmt.Errorf("append common local Git exclude %q: %w", path, err)
-	}
-	if err := file.Sync(); err != nil {
-		_ = file.Close()
-		return nil, fmt.Errorf("sync common local Git exclude %q: %w", path, err)
-	}
-	if err := file.Close(); err != nil {
-		return nil, fmt.Errorf("close common local Git exclude %q: %w", path, err)
-	}
 	updated := append(append([]byte(nil), original...), addition...)
 	return &ExcludeUpdate{path: path, original: original, updated: updated}, nil
 }
 
+func (update *ExcludeUpdate) Commit() error {
+	if update == nil || update.path == "" || update.published {
+		return nil
+	}
+	current, err := os.ReadFile(update.path)
+	if err != nil {
+		return fmt.Errorf("recheck common local Git exclude %q: %w", update.path, err)
+	}
+	if !bytes.Equal(current, update.original) {
+		return fmt.Errorf("common local Git exclude %q changed during add", update.path)
+	}
+	file, err := os.OpenFile(update.path, os.O_WRONLY|os.O_APPEND, 0)
+	if err != nil {
+		return fmt.Errorf("open common local Git exclude %q: %w", update.path, err)
+	}
+	if _, err := file.Write(update.updated[len(update.original):]); err != nil {
+		_ = file.Close()
+		return fmt.Errorf("append common local Git exclude %q: %w", update.path, err)
+	}
+	update.published = true
+	if err := file.Sync(); err != nil {
+		_ = file.Close()
+		return fmt.Errorf("sync common local Git exclude %q: %w", update.path, err)
+	}
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("close common local Git exclude %q: %w", update.path, err)
+	}
+	return nil
+}
+
 func (update *ExcludeUpdate) Abort() error {
-	if update == nil || update.path == "" {
+	if update == nil || update.path == "" || !update.published {
 		return nil
 	}
 	current, err := os.ReadFile(update.path)
@@ -162,7 +189,11 @@ func (update *ExcludeUpdate) Abort() error {
 		_ = file.Close()
 		return fmt.Errorf("sync restored local exclude: %w", err)
 	}
-	return file.Close()
+	if err := file.Close(); err != nil {
+		return err
+	}
+	update.published = false
+	return nil
 }
 
 func CreateWorktree(mainCheckout, worktreePath, branch, baseRef string) error {
@@ -170,8 +201,18 @@ func CreateWorktree(mainCheckout, worktreePath, branch, baseRef string) error {
 	return err
 }
 
+func CreateBranch(mainCheckout, branch, baseRef string) error {
+	_, err := Run(mainCheckout, "branch", "--no-track", branch, baseRef)
+	return err
+}
+
 func AttachWorktree(mainCheckout, worktreePath, branch string) error {
 	_, err := Run(mainCheckout, "worktree", "add", worktreePath, branch)
+	return err
+}
+
+func MoveWorktree(mainCheckout, sourcePath, destinationPath string) error {
+	_, err := Run(mainCheckout, "worktree", "move", sourcePath, destinationPath)
 	return err
 }
 
