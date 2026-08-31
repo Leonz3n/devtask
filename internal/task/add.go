@@ -21,6 +21,7 @@ type AddResult struct {
 	TaskName        string
 	Attachment      RepositoryAttachment
 	AlreadyAttached bool
+	Warnings        []string
 }
 
 func AddRepository(paths config.Paths, configuration config.Config, taskName, repositoryAlias string, baseOverride *string, fetchOverride *bool) (AddResult, error) {
@@ -50,6 +51,8 @@ type addPlan struct {
 	ownedWorktreePath       string
 	ownedWorktreeInfo       os.FileInfo
 	compensationErrors      []error
+	sharedProjection        *workspace.SharedLocalPathProjection
+	warnings                []string
 }
 
 type repositoryLockTarget struct {
@@ -314,7 +317,13 @@ func AddRepositories(paths config.Paths, configuration config.Config, taskName s
 					rollbackErrors = append(rollbackErrors, err)
 				}
 			}
-			if plan.worktreeOwned {
+			sharedAbortError := error(nil)
+			if plan.sharedProjection != nil {
+				sharedAbortError = plan.sharedProjection.Abort()
+				plan.attachment.ManagedLinks = plan.sharedProjection.ManagedLinks()
+				recordPlanError(sharedAbortError)
+			}
+			if plan.worktreeOwned && sharedAbortError == nil {
 				if record, recordError := gitcmd.WorktreeAt(plan.attachment.MainCheckout, plan.ownedWorktreePath); recordError == nil {
 					if record.BranchRef != plan.branchRef {
 						recordPlanError(fmt.Errorf("refuse to remove changed Task Worktree record for repository %q: expected Task Branch Name ref %q, found %q", plan.attachment.Alias, plan.branchRef, record.BranchRef))
@@ -449,6 +458,18 @@ func AddRepositories(paths config.Paths, configuration config.Config, taskName s
 			return nil, rollback(err)
 		}
 	}
+	for index := range plans {
+		plan := &plans[index]
+		plan.sharedProjection, err = workspace.PrepareSharedLocalPaths(plan.attachment.MainCheckout, plan.attachment.WorktreePath, plan.repositoryConfiguration.SharedPaths)
+		if err != nil {
+			return nil, rollback(fmt.Errorf("prepare Shared Local Paths for repository %q: %w", plan.attachment.Alias, err))
+		}
+		if err := plan.sharedProjection.Commit(); err != nil {
+			return nil, rollback(fmt.Errorf("project Shared Local Paths for repository %q: %w", plan.attachment.Alias, err))
+		}
+		plan.attachment.ManagedLinks = plan.sharedProjection.ManagedLinks()
+		plan.warnings = plan.sharedProjection.Warnings()
+	}
 	if projection != nil {
 		if err := projection.Commit(); err != nil {
 			return nil, rollback(err)
@@ -479,7 +500,8 @@ func AddRepositories(paths config.Paths, configuration config.Config, taskName s
 		if request.existingIndex >= 0 {
 			results = append(results, AddResult{TaskName: metadata.Name, Attachment: metadata.Attachments[request.existingIndex], AlreadyAttached: true})
 		} else {
-			results = append(results, AddResult{TaskName: metadata.Name, Attachment: plans[request.planIndex].attachment})
+			plan := plans[request.planIndex]
+			results = append(results, AddResult{TaskName: metadata.Name, Attachment: plan.attachment, Warnings: append([]string(nil), plan.warnings...)})
 		}
 	}
 	return results, nil

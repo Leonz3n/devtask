@@ -27,6 +27,12 @@ type listedTask struct {
 	CreatedAt       time.Time `json:"created_at"`
 }
 
+type persistedManagedLink struct {
+	Source      string `yaml:"source"`
+	Destination string `yaml:"destination"`
+	Target      string `yaml:"target"`
+}
+
 type persistedTask struct {
 	SchemaVersion  int       `yaml:"schema_version"`
 	Name           string    `yaml:"name"`
@@ -44,19 +50,19 @@ type persistedTask struct {
 		SHA256 string `yaml:"sha256"`
 	} `yaml:"context_files"`
 	Attachments []struct {
-		Alias           string   `yaml:"alias"`
-		MainCheckout    string   `yaml:"main_checkout"`
-		WorktreePath    string   `yaml:"worktree_path"`
-		TaskBranchName  string   `yaml:"task_branch_name"`
-		BaseBranch      string   `yaml:"base_branch"`
-		BaseRef         string   `yaml:"base_ref"`
-		BaseCommit      string   `yaml:"base_commit"`
-		Order           int      `yaml:"order"`
-		BranchExisted   bool     `yaml:"branch_existed"`
-		ManagedLinks    []any    `yaml:"managed_links"`
-		State           string   `yaml:"state"`
-		LastError       string   `yaml:"last_error"`
-		ResidualObjects []string `yaml:"residual_objects"`
+		Alias           string                 `yaml:"alias"`
+		MainCheckout    string                 `yaml:"main_checkout"`
+		WorktreePath    string                 `yaml:"worktree_path"`
+		TaskBranchName  string                 `yaml:"task_branch_name"`
+		BaseBranch      string                 `yaml:"base_branch"`
+		BaseRef         string                 `yaml:"base_ref"`
+		BaseCommit      string                 `yaml:"base_commit"`
+		Order           int                    `yaml:"order"`
+		BranchExisted   bool                   `yaml:"branch_existed"`
+		ManagedLinks    []persistedManagedLink `yaml:"managed_links"`
+		State           string                 `yaml:"state"`
+		LastError       string                 `yaml:"last_error"`
+		ResidualObjects []string               `yaml:"residual_objects"`
 	} `yaml:"attachments"`
 }
 

@@ -57,7 +57,7 @@ func NewRootCommand(stdout, stderr io.Writer) *cobra.Command {
 	})
 	root.AddCommand(newInitCommand(stdout))
 	root.AddCommand(newRepoCommand(stdout))
-	root.AddCommand(newTaskCommand(stdout), newTaskListCommand(stdout), newTaskAddCommand(stdout), newTaskStatusCommand(stdout))
+	root.AddCommand(newTaskCommand(stdout), newTaskListCommand(stdout), newTaskAddCommand(stdout, stderr), newTaskStatusCommand(stdout))
 	return root
 }
 
@@ -204,7 +204,7 @@ func formatAttachmentState(attachment task.AttachmentStatus) string {
 	return strings.Join(states, ", ")
 }
 
-func newTaskAddCommand(stdout io.Writer) *cobra.Command {
+func newTaskAddCommand(stdout, stderr io.Writer) *cobra.Command {
 	var base string
 	var fetch bool
 	var noFetch bool
@@ -245,6 +245,11 @@ func newTaskAddCommand(stdout io.Writer) *cobra.Command {
 				return err
 			}
 			for _, result := range results {
+				for _, warning := range result.Warnings {
+					if _, err = fmt.Fprintf(stderr, "warning: repository %s: %s\n", result.Attachment.Alias, warning); err != nil {
+						return err
+					}
+				}
 				action := "attached"
 				if result.AlreadyAttached {
 					action = "already attached"

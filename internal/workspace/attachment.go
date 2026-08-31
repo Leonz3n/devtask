@@ -14,8 +14,9 @@ import (
 )
 
 type ManagedLink struct {
-	Path   string `yaml:"path"`
-	Target string `yaml:"target"`
+	Source      string `yaml:"source"`
+	Destination string `yaml:"destination"`
+	Target      string `yaml:"target"`
 }
 
 type Attachment struct {

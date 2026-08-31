@@ -47,6 +47,14 @@ func RefExists(directory, ref string) (bool, error) {
 	return RunPredicate(directory, "show-ref", "--verify", "--quiet", ref)
 }
 
+func PathTracked(directory, path string) (bool, error) {
+	return RunPredicate(directory, "ls-files", "--error-unmatch", "--", path)
+}
+
+func PathIgnored(directory, path string) (bool, error) {
+	return RunPredicate(directory, "check-ignore", "--no-index", "--quiet", "--", path)
+}
+
 func ValidateBranchName(name string) error {
 	command := exec.Command("git", "check-ref-format", "--branch", name)
 	output, err := command.CombinedOutput()
