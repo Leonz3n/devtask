@@ -109,6 +109,9 @@ func (prepared *Prepared) Commit() error {
 	if prepared.owned == nil || !os.SameFile(prepared.owned, info) {
 		return fmt.Errorf("published Task Workspace %q changed identity", prepared.Path)
 	}
+	if err := verifyGeneratedWorkspace(prepared.Path, info, prepared.expected); err != nil {
+		return fmt.Errorf("published Task Workspace %q changed: %w", prepared.Path, err)
+	}
 	prepared.published = prepared.owned
 	return fileutil.SyncDirectory(filepath.Dir(prepared.Path))
 }
@@ -176,6 +179,9 @@ func verifyGeneratedWorkspace(path string, directory os.FileInfo, expected []gen
 	if !directory.IsDir() || directory.Mode()&os.ModeSymlink != 0 {
 		return errors.New("expected a generated directory")
 	}
+	if directory.Mode().Perm() != 0o700 {
+		return fmt.Errorf("directory permissions are %04o, expected 0700", directory.Mode().Perm())
+	}
 	entries, err := os.ReadDir(path)
 	if err != nil {
 		return err
@@ -198,6 +204,9 @@ func verifyGeneratedWorkspace(path string, directory os.FileInfo, expected []gen
 		}
 		if !info.Mode().IsRegular() {
 			return fmt.Errorf("generated entry %q is not a regular file", entry.Name())
+		}
+		if info.Mode().Perm() != 0o600 {
+			return fmt.Errorf("generated entry %q permissions are %04o, expected 0600", entry.Name(), info.Mode().Perm())
 		}
 		contents, err := os.ReadFile(filepath.Join(path, entry.Name()))
 		if err != nil {

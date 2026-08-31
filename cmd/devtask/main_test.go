@@ -1082,6 +1082,52 @@ func TestNewRecoversWorkspacePublishedBeforeMetadata(t *testing.T) {
 	}
 }
 
+func TestNewRejectsGeneratedLookingWorkspaceWithUnmanagedPermissions(t *testing.T) {
+	tests := []struct {
+		name   string
+		change func(string) error
+	}{
+		{
+			name: "workspace directory",
+			change: func(workspace string) error {
+				return os.Chmod(workspace, 0o755)
+			},
+		},
+		{
+			name: "Task Context File",
+			change: func(workspace string) error {
+				return os.Chmod(filepath.Join(workspace, "TASK.md"), 0o644)
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			environment := initializedCLIEnvironment(t)
+			created := environment.run(t, "new", "billing")
+			if created.code != 0 {
+				t.Fatalf("initial new failed: %s", created.stderr)
+			}
+			metadataPath := filepath.Join(environment.dataHome, "devtask", "tasks", "billing.yaml")
+			if err := os.Remove(metadataPath); err != nil {
+				t.Fatal(err)
+			}
+			workspace := filepath.Join(environment.dataHome, "devtask", "workspaces", "billing")
+			if err := test.change(workspace); err != nil {
+				t.Fatal(err)
+			}
+
+			result := environment.run(t, "new", "billing")
+
+			if result.code != 2 || !strings.Contains(result.stderr, "Task Workspace collision") {
+				t.Fatalf("new result: code=%d stderr=%q, want protected collision", result.code, result.stderr)
+			}
+			if _, err := os.Stat(metadataPath); !os.IsNotExist(err) {
+				t.Fatal("unmanaged Workspace permissions produced ready Task metadata")
+			}
+		})
+	}
+}
+
 func TestNewRecoversAfterProcessInterruptionAtWorkspacePublication(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("devtask v1 supports macOS and Linux")

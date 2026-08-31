@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/Leonz3n/devtask/internal/fileutil"
 	"github.com/Leonz3n/devtask/internal/lock"
 )
 
@@ -110,7 +111,7 @@ func writeAtomicChecked(path string, contents []byte, mode os.FileMode, original
 			return fmt.Errorf("remove displaced configuration: %w", err)
 		}
 	}
-	return syncDirectory(directory)
+	return fileutil.SyncDirectory(directory)
 }
 
 func restoreDisplacedConfiguration(temporaryPath, path, directory string) error {
@@ -122,15 +123,6 @@ func restoreDisplacedConfiguration(temporaryPath, path, directory string) error 
 
 func removeAndSync(path, directory string) error {
 	removeError := os.Remove(path)
-	syncError := syncDirectory(directory)
+	syncError := fileutil.SyncDirectory(directory)
 	return errors.Join(removeError, syncError)
-}
-
-func syncDirectory(directory string) error {
-	dir, err := os.Open(directory)
-	if err != nil {
-		return err
-	}
-	defer dir.Close()
-	return dir.Sync()
 }
