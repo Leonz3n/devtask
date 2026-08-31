@@ -44,13 +44,38 @@ type commandResult struct {
 	code   int
 }
 
-func runDevtask(t *testing.T, home, configHome, dataHome string, args ...string) commandResult {
+type cliTestEnvironment struct {
+	home       string
+	configHome string
+	dataHome   string
+}
+
+func newCLITestEnvironment(t *testing.T) cliTestEnvironment {
+	t.Helper()
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	if err := os.Mkdir(home, 0o700); err != nil {
+		t.Fatalf("create test home: %v", err)
+	}
+	return cliTestEnvironment{
+		home:       home,
+		configHome: filepath.Join(root, "config"),
+		dataHome:   filepath.Join(root, "data"),
+	}
+}
+
+func (environment cliTestEnvironment) run(t *testing.T, args ...string) commandResult {
+	t.Helper()
+	return environment.runWithXDG(t, environment.configHome, environment.dataHome, args...)
+}
+
+func (environment cliTestEnvironment) runWithXDG(t *testing.T, configHome, dataHome string, args ...string) commandResult {
 	t.Helper()
 
 	command := exec.Command(devtaskBinary(t), args...)
-	command.Dir = home
+	command.Dir = environment.home
 	command.Env = append(filteredEnvironment(os.Environ()),
-		"HOME="+home,
+		"HOME="+environment.home,
 		"XDG_CONFIG_HOME="+configHome,
 		"XDG_DATA_HOME="+dataHome,
 	)
@@ -92,11 +117,9 @@ func filteredEnvironment(environment []string) []string {
 }
 
 func TestHelpDoesNotInitializeState(t *testing.T) {
-	home := t.TempDir()
-	configHome := filepath.Join(t.TempDir(), "config")
-	dataHome := filepath.Join(t.TempDir(), "data")
+	environment := newCLITestEnvironment(t)
 
-	result := runDevtask(t, home, configHome, dataHome, "--help")
+	result := environment.run(t, "--help")
 
 	if result.code != 0 {
 		t.Fatalf("exit code = %d, want 0; stderr: %s", result.code, result.stderr)
@@ -104,10 +127,23 @@ func TestHelpDoesNotInitializeState(t *testing.T) {
 	if !strings.Contains(result.stdout, "Usage:") || !strings.Contains(result.stdout, "devtask init") {
 		t.Fatalf("help output does not describe the CLI:\n%s", result.stdout)
 	}
-	for _, path := range []string{filepath.Join(configHome, "devtask"), filepath.Join(dataHome, "devtask")} {
+	for _, path := range []string{filepath.Join(environment.configHome, "devtask"), filepath.Join(environment.dataHome, "devtask")} {
 		if _, err := os.Stat(path); !os.IsNotExist(err) {
 			t.Fatalf("help created state path %q", path)
 		}
+	}
+}
+
+func TestUnknownCommandUsesValidationExitCode(t *testing.T) {
+	environment := newCLITestEnvironment(t)
+
+	result := environment.run(t, "does-not-exist")
+
+	if result.code != 2 {
+		t.Fatalf("exit code = %d, want 2; stderr: %s", result.code, result.stderr)
+	}
+	if !strings.Contains(result.stderr, "unknown command") {
+		t.Fatalf("stderr = %q, want unknown-command diagnostic", result.stderr)
 	}
 }
 
@@ -115,11 +151,9 @@ func TestInitCreatesVersionedStateInAbsoluteXDGLocations(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("devtask v1 supports macOS and Linux")
 	}
-	home := t.TempDir()
-	configHome := filepath.Join(t.TempDir(), "config")
-	dataHome := filepath.Join(t.TempDir(), "data")
+	environment := newCLITestEnvironment(t)
 
-	result := runDevtask(t, home, configHome, dataHome, "init")
+	result := environment.run(t, "init")
 
 	if result.code != 0 {
 		t.Fatalf("exit code = %d, want 0; stderr: %s", result.code, result.stderr)
@@ -127,12 +161,12 @@ func TestInitCreatesVersionedStateInAbsoluteXDGLocations(t *testing.T) {
 	if result.stderr != "" {
 		t.Fatalf("stderr = %q, want empty", result.stderr)
 	}
-	configPath := filepath.Join(configHome, "devtask", "config.yaml")
+	configPath := filepath.Join(environment.configHome, "devtask", "config.yaml")
 	assertFileMode(t, configPath, 0o600)
-	assertDirectoryMode(t, filepath.Join(configHome, "devtask"), 0o700)
-	assertDirectoryMode(t, filepath.Join(dataHome, "devtask"), 0o700)
-	assertDirectoryMode(t, filepath.Join(dataHome, "devtask", "tasks"), 0o700)
-	assertDirectoryMode(t, filepath.Join(dataHome, "devtask", "workspaces"), 0o700)
+	assertDirectoryMode(t, filepath.Join(environment.configHome, "devtask"), 0o700)
+	assertDirectoryMode(t, filepath.Join(environment.dataHome, "devtask"), 0o700)
+	assertDirectoryMode(t, filepath.Join(environment.dataHome, "devtask", "tasks"), 0o700)
+	assertDirectoryMode(t, filepath.Join(environment.dataHome, "devtask", "workspaces"), 0o700)
 	contents, err := os.ReadFile(configPath)
 	if err != nil {
 		t.Fatal(err)
@@ -140,26 +174,24 @@ func TestInitCreatesVersionedStateInAbsoluteXDGLocations(t *testing.T) {
 	if !strings.HasPrefix(string(contents), "schema_version: 1\n") {
 		t.Fatalf("config does not start with schema version 1:\n%s", contents)
 	}
-	if !strings.Contains(result.stdout, configPath) || !strings.Contains(result.stdout, filepath.Join(dataHome, "devtask")) {
+	if !strings.Contains(result.stdout, configPath) || !strings.Contains(result.stdout, filepath.Join(environment.dataHome, "devtask")) {
 		t.Fatalf("init output does not identify persisted state:\n%s", result.stdout)
 	}
 }
 
 func TestInitIsIdempotentAndPreservesExistingConfiguration(t *testing.T) {
-	home := t.TempDir()
-	configHome := filepath.Join(t.TempDir(), "config")
-	dataHome := filepath.Join(t.TempDir(), "data")
-	first := runDevtask(t, home, configHome, dataHome, "init")
+	environment := newCLITestEnvironment(t)
+	first := environment.run(t, "init")
 	if first.code != 0 {
 		t.Fatalf("first init failed: %s", first.stderr)
 	}
 
-	configPath := filepath.Join(configHome, "devtask", "config.yaml")
+	configPath := filepath.Join(environment.configHome, "devtask", "config.yaml")
 	custom := "schema_version: 1\n\ndefaults:\n  base_branch: trunk\n"
 	if err := os.WriteFile(configPath, []byte(custom), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	second := runDevtask(t, home, configHome, dataHome, "init")
+	second := environment.run(t, "init")
 	if second.code != 0 {
 		t.Fatalf("second init failed: %s", second.stderr)
 	}
@@ -173,16 +205,16 @@ func TestInitIsIdempotentAndPreservesExistingConfiguration(t *testing.T) {
 }
 
 func TestInitIgnoresRelativeXDGValues(t *testing.T) {
-	home := t.TempDir()
+	environment := newCLITestEnvironment(t)
 
-	result := runDevtask(t, home, "relative-config", "relative-data", "init")
+	result := environment.runWithXDG(t, "relative-config", "relative-data", "init")
 
 	if result.code != 0 {
 		t.Fatalf("exit code = %d, want 0; stderr: %s", result.code, result.stderr)
 	}
-	assertFileMode(t, filepath.Join(home, ".config", "devtask", "config.yaml"), 0o600)
-	assertDirectoryMode(t, filepath.Join(home, ".local", "share", "devtask"), 0o700)
-	for _, path := range []string{filepath.Join(home, "relative-config"), filepath.Join(home, "relative-data")} {
+	assertFileMode(t, filepath.Join(environment.home, ".config", "devtask", "config.yaml"), 0o600)
+	assertDirectoryMode(t, filepath.Join(environment.home, ".local", "share", "devtask"), 0o700)
+	for _, path := range []string{filepath.Join(environment.home, "relative-config"), filepath.Join(environment.home, "relative-data")} {
 		if _, err := os.Stat(path); !os.IsNotExist(err) {
 			t.Fatalf("relative XDG value created path %q", path)
 		}
@@ -225,14 +257,42 @@ func TestInitRejectsInvalidExistingConfiguration(t *testing.T) {
 			config:  "schema_version: 1\ndefaults:\n  branch_pattern: 'feat/{{.Unknown}}'\n",
 			message: "defaults.branch_pattern",
 		},
+		{
+			name:    "invalid repository alias",
+			config:  "schema_version: 1\nrepositories:\n  'bad alias':\n    path: /tmp/repository\n",
+			message: "invalid repository alias",
+		},
+		{
+			name:    "reserved repository alias",
+			config:  "schema_version: 1\nrepositories:\n  TASK.md:\n    path: /tmp/repository\n",
+			message: "reserved Task Context File name",
+		},
+		{
+			name:    "case insensitive repository alias conflict",
+			config:  "schema_version: 1\nrepositories:\n  service:\n    path: /tmp/one\n  SERVICE:\n    path: /tmp/two\n",
+			message: "conflict case-insensitively",
+		},
+		{
+			name:    "unsafe shared local path",
+			config:  "schema_version: 1\nrepositories:\n  service:\n    path: /tmp/repository\n    shared_paths: ['../secret']\n",
+			message: "shared path",
+		},
+		{
+			name:    "invalid repository group name",
+			config:  "schema_version: 1\ngroups:\n  'bad group': []\n",
+			message: "invalid repository group name",
+		},
+		{
+			name:    "unknown repository group member",
+			config:  "schema_version: 1\ngroups:\n  billing: [missing]\n",
+			message: "references unknown repository alias",
+		},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			home := t.TempDir()
-			configHome := filepath.Join(t.TempDir(), "config")
-			dataHome := filepath.Join(t.TempDir(), "data")
-			configDirectory := filepath.Join(configHome, "devtask")
+			environment := newCLITestEnvironment(t)
+			configDirectory := filepath.Join(environment.configHome, "devtask")
 			if err := os.MkdirAll(configDirectory, 0o700); err != nil {
 				t.Fatal(err)
 			}
@@ -241,7 +301,7 @@ func TestInitRejectsInvalidExistingConfiguration(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			result := runDevtask(t, home, configHome, dataHome, "init")
+			result := environment.run(t, "init")
 
 			if result.code != 2 {
 				t.Fatalf("exit code = %d, want 2; stderr: %s", result.code, result.stderr)
@@ -249,7 +309,7 @@ func TestInitRejectsInvalidExistingConfiguration(t *testing.T) {
 			if !strings.Contains(result.stderr, test.message) {
 				t.Fatalf("stderr = %q, want it to contain %q", result.stderr, test.message)
 			}
-			if _, err := os.Stat(filepath.Join(dataHome, "devtask")); !os.IsNotExist(err) {
+			if _, err := os.Stat(filepath.Join(environment.dataHome, "devtask")); !os.IsNotExist(err) {
 				t.Fatalf("invalid configuration created data state")
 			}
 		})
@@ -260,10 +320,8 @@ func TestInitFailsClearlyWhenConfigurationLockIsBusy(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("devtask v1 supports macOS and Linux")
 	}
-	home := t.TempDir()
-	configHome := filepath.Join(t.TempDir(), "config")
-	dataHome := filepath.Join(t.TempDir(), "data")
-	configDirectory := filepath.Join(configHome, "devtask")
+	environment := newCLITestEnvironment(t)
+	configDirectory := filepath.Join(environment.configHome, "devtask")
 	if err := os.MkdirAll(configDirectory, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -277,7 +335,7 @@ func TestInitFailsClearlyWhenConfigurationLockIsBusy(t *testing.T) {
 		t.Fatalf("hold config lock: %v", err)
 	}
 
-	result := runDevtask(t, home, configHome, dataHome, "init")
+	result := environment.run(t, "init")
 
 	if result.code != 1 {
 		t.Fatalf("exit code = %d, want 1; stderr: %s", result.code, result.stderr)

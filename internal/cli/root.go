@@ -18,7 +18,11 @@ func (e *validationError) Error() string { return e.err.Error() }
 func (e *validationError) Unwrap() error { return e.err }
 
 func Execute() error {
-	return NewRootCommand(os.Stdout, os.Stderr).Execute()
+	root := NewRootCommand(os.Stdout, os.Stderr)
+	if _, _, err := root.Find(os.Args[1:]); err != nil {
+		return &validationError{err: err}
+	}
+	return root.Execute()
 }
 
 func NewRootCommand(stdout, stderr io.Writer) *cobra.Command {
@@ -28,6 +32,17 @@ func NewRootCommand(stdout, stderr io.Writer) *cobra.Command {
 		Example:       "  devtask init",
 		SilenceErrors: true,
 		SilenceUsage:  true,
+		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
+			if cmd.Annotations["devtask.dev/requires-initialization"] == "false" {
+				return nil
+			}
+			paths, err := config.ResolvePaths()
+			if err != nil {
+				return err
+			}
+			_, err = config.Load(paths.ConfigFile)
+			return err
+		},
 	}
 	root.SetOut(stdout)
 	root.SetErr(stderr)
@@ -40,8 +55,9 @@ func NewRootCommand(stdout, stderr io.Writer) *cobra.Command {
 
 func newInitCommand(stdout io.Writer) *cobra.Command {
 	return &cobra.Command{
-		Use:   "init",
-		Short: "Initialize devtask local state",
+		Use:         "init",
+		Short:       "Initialize devtask local state",
+		Annotations: map[string]string{"devtask.dev/requires-initialization": "false"},
 		Args: func(cmd *cobra.Command, args []string) error {
 			if err := cobra.NoArgs(cmd, args); err != nil {
 				return &validationError{err: err}
@@ -67,7 +83,7 @@ func ExitCode(err error) int {
 		return 0
 	}
 	var validation *validationError
-	if errors.As(err, &validation) || errors.Is(err, config.ErrInvalid) {
+	if errors.As(err, &validation) || errors.Is(err, config.ErrInvalid) || errors.Is(err, config.ErrNotInitialized) {
 		return 2
 	}
 	return 1

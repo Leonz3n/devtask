@@ -6,43 +6,30 @@ import (
 	"os"
 	"path/filepath"
 
-	"golang.org/x/sys/unix"
+	"github.com/Leonz3n/devtask/internal/lock"
 )
 
 var ErrInvalid = errors.New("invalid configuration")
-
-const seedConfiguration = `schema_version: 1
-
-defaults:
-  base_branch: main
-  branch_pattern: "feat/{{.Task}}"
-  remote: origin
-  fetch: true
-
-agents:
-  pi:
-    command: pi
-  claude:
-    command: claude
-  codex:
-    command: codex
-
-repositories: {}
-groups: {}
-`
 
 func Initialize(paths Paths) error {
 	if err := os.MkdirAll(paths.ConfigDir, 0o700); err != nil {
 		return fmt.Errorf("create config directory: %w", err)
 	}
-	lock, err := acquireLock(paths.LockFile)
+	configLock, err := lock.Acquire(paths.LockFile)
 	if err != nil {
+		if errors.Is(err, lock.ErrBusy) {
+			return fmt.Errorf("config is busy: another devtask process holds %s", paths.LockFile)
+		}
 		return err
 	}
-	defer lock.close()
+	defer configLock.Close()
 
 	if _, err := os.Stat(paths.ConfigFile); errors.Is(err, os.ErrNotExist) {
-		if err := writeAtomic(paths.ConfigFile, []byte(seedConfiguration), 0o600); err != nil {
+		contents, err := marshal(Default())
+		if err != nil {
+			return err
+		}
+		if err := writeAtomic(paths.ConfigFile, contents, 0o600); err != nil {
 			return fmt.Errorf("create configuration: %w", err)
 		}
 	} else if err != nil {
@@ -57,30 +44,6 @@ func Initialize(paths Paths) error {
 		}
 	}
 	return nil
-}
-
-type fileLock struct {
-	file *os.File
-}
-
-func acquireLock(path string) (*fileLock, error) {
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
-	if err != nil {
-		return nil, fmt.Errorf("open config lock: %w", err)
-	}
-	if err := unix.Flock(int(file.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
-		_ = file.Close()
-		if errors.Is(err, unix.EWOULDBLOCK) {
-			return nil, fmt.Errorf("config is busy: another devtask process holds %s", path)
-		}
-		return nil, fmt.Errorf("lock configuration: %w", err)
-	}
-	return &fileLock{file: file}, nil
-}
-
-func (lock *fileLock) close() {
-	_ = unix.Flock(int(lock.file.Fd()), unix.LOCK_UN)
-	_ = lock.file.Close()
 }
 
 func writeAtomic(path string, contents []byte, mode os.FileMode) error {
