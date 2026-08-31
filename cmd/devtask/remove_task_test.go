@@ -35,7 +35,7 @@ func TestRemoveTaskRemovesEveryAttachmentThenWorkspaceAndMetadata(t *testing.T) 
 		if _, err := os.Lstat(filepath.Join(repository, ".worktrees", "billing")); !os.IsNotExist(err) {
 			t.Fatalf("%s Task Worktree remains: %v", alias, err)
 		}
-		if branch := gitRun(t, "-C", repository, "branch", "--list", "feat/billing"); branch == "" {
+		if taskBranchName := gitRun(t, "-C", repository, "branch", "--list", "feat/billing"); taskBranchName == "" {
 			t.Fatalf("%s Task Branch Name was deleted", alias)
 		}
 	}
@@ -265,7 +265,7 @@ func TestRemoveTaskForceAuthorizesContentButNotWorkspaceLinkIdentity(t *testing.
 			t.Fatalf("forced remove left Task Workspace: %v", err)
 		}
 		for alias, repository := range repositories {
-			if branch := gitRun(t, "-C", repository, "branch", "--list", "feat/billing"); branch == "" {
+			if taskBranchName := gitRun(t, "-C", repository, "branch", "--list", "feat/billing"); taskBranchName == "" {
 				t.Fatalf("--force deleted %s Task Branch Name without --delete-branch", alias)
 			}
 		}
@@ -368,25 +368,25 @@ func TestRemoveTaskPreflightsGeneratedAgentsProjectionBeforeDeletingAnything(t *
 	}
 }
 
-func TestRemoveTaskDeletesEveryMergedTaskBranchOnlyWhenRequested(t *testing.T) {
+func TestRemoveTaskDeletesEveryMergedTaskBranchNameOnlyWhenRequested(t *testing.T) {
 	environment, repositories := createTaskWithAttachments(t, "invoice", "ledger")
 
 	result := environment.run(t, "remove", "billing", "--delete-branch", "--no-fetch")
 
 	if result.code != 0 {
-		t.Fatalf("branch removal failed: code=%d stderr=%q", result.code, result.stderr)
+		t.Fatalf("Task Branch Name removal failed: code=%d stderr=%q", result.code, result.stderr)
 	}
 	for alias, repository := range repositories {
-		if branch := gitRun(t, "-C", repository, "branch", "--list", "feat/billing"); branch != "" {
-			t.Fatalf("%s Task Branch Name remains: %q", alias, branch)
+		if taskBranchName := gitRun(t, "-C", repository, "branch", "--list", "feat/billing"); taskBranchName != "" {
+			t.Fatalf("%s Task Branch Name remains: %q", alias, taskBranchName)
 		}
 		if !strings.Contains(result.stdout, "deleted Task Branch Name feat/billing for "+alias) {
-			t.Fatalf("stdout=%q, want %s branch result", result.stdout, alias)
+			t.Fatalf("stdout=%q, want %s Task Branch Name result", result.stdout, alias)
 		}
 	}
 }
 
-func TestRemoveTaskRequiresForceToDeleteAnyUnmergedTaskBranch(t *testing.T) {
+func TestRemoveTaskRequiresForceToDeleteAnyUnmergedTaskBranchName(t *testing.T) {
 	environment, repositories := createTaskWithAttachments(t, "invoice", "ledger")
 	invoiceWorktree := filepath.Join(repositories["invoice"], ".worktrees", "billing")
 	if err := os.WriteFile(filepath.Join(invoiceWorktree, "task.txt"), []byte("task change\n"), 0o600); err != nil {
@@ -407,11 +407,11 @@ func TestRemoveTaskRequiresForceToDeleteAnyUnmergedTaskBranch(t *testing.T) {
 
 	forced := environment.run(t, "remove", "billing", "--delete-branch", "--force", "--no-fetch")
 	if forced.code != 0 {
-		t.Fatalf("forced branch removal failed: code=%d stderr=%q", forced.code, forced.stderr)
+		t.Fatalf("forced Task Branch Name removal failed: code=%d stderr=%q", forced.code, forced.stderr)
 	}
 	for alias, repository := range repositories {
-		if branch := gitRun(t, "-C", repository, "branch", "--list", "feat/billing"); branch != "" {
-			t.Fatalf("forced removal left %s Task Branch Name: %q", alias, branch)
+		if taskBranchName := gitRun(t, "-C", repository, "branch", "--list", "feat/billing"); taskBranchName != "" {
+			t.Fatalf("forced removal left %s Task Branch Name: %q", alias, taskBranchName)
 		}
 	}
 }
@@ -444,7 +444,7 @@ func TestRemoveTaskReportsEveryBusyRepositoryLockBeforeMutation(t *testing.T) {
 	}
 }
 
-func TestRemoveTaskCheckpointsWorktreeRemovalBeforeBranchAction(t *testing.T) {
+func TestRemoveTaskCheckpointsWorktreeRemovalBeforeTaskBranchNameAction(t *testing.T) {
 	environment, repositories := createTaskWithAttachments(t, "invoice")
 	result := runFaultEnabledCLI(t, environment, map[string]string{
 		"DEVTASK_TEST_FAIL_TASK_REMOVE_AFTER_WORKTREE_ALIAS": "invoice",
@@ -456,7 +456,7 @@ func TestRemoveTaskCheckpointsWorktreeRemovalBeforeBranchAction(t *testing.T) {
 	if _, err := os.Lstat(filepath.Join(repositories["invoice"], ".worktrees", "billing")); !os.IsNotExist(err) {
 		t.Fatalf("Task Worktree was not removed: %v", err)
 	}
-	if branch := gitRun(t, "-C", repositories["invoice"], "branch", "--list", "feat/billing"); branch == "" {
+	if taskBranchName := gitRun(t, "-C", repositories["invoice"], "branch", "--list", "feat/billing"); taskBranchName == "" {
 		t.Fatal("fault should happen before Task Branch Name deletion")
 	}
 	metadata := readPersistedTask(t, environment, "billing")
