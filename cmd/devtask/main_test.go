@@ -348,7 +348,7 @@ func TestInitRejectsInvalidExistingConfiguration(t *testing.T) {
 		{
 			name:    "unknown repository group member",
 			config:  "schema_version: 1\ngroups:\n  billing: [missing]\n",
-			message: "references unknown repository alias",
+			message: "references unknown Repository Alias",
 		},
 	}
 
