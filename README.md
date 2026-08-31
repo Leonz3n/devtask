@@ -120,7 +120,7 @@ groups:
 
 Unknown fields and unsupported schema versions are errors. Agent `command` values are one executable name or absolute path, never shell expressions.
 
-For base branch, remote, and fetch behavior, command-line options override Registered Repository settings, which override global defaults. If no value is configured, the effective defaults are `main`, `origin`, and fetch enabled.
+For the base branch and fetch behavior, command-line options override Registered Repository settings, which override global defaults. The remote is selected by Registered Repository settings and then global defaults; v1 has no command-line remote override. If no value is configured, the effective defaults are `main`, `origin`, and fetch enabled.
 
 ## Repository Groups
 
