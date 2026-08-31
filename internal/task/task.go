@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/Leonz3n/devtask/internal/config"
+	"github.com/Leonz3n/devtask/internal/fileutil"
 	gitcmd "github.com/Leonz3n/devtask/internal/git"
 	"github.com/Leonz3n/devtask/internal/lock"
 	"github.com/Leonz3n/devtask/internal/workspace"
@@ -79,7 +80,10 @@ func Create(paths config.Paths, configuration config.Config, name string, branch
 
 	prepared, err := workspace.Prepare(paths.Workspaces, name, branchName)
 	if err != nil {
-		return Metadata{}, invalid("%v", err)
+		if errors.Is(err, workspace.ErrCollision) {
+			return Metadata{}, invalid("%v", err)
+		}
+		return Metadata{}, err
 	}
 	metadata := Metadata{
 		SchemaVersion:  SchemaVersion,
@@ -92,19 +96,22 @@ func Create(paths config.Paths, configuration config.Config, name string, branch
 	}
 	contents, err := yaml.Marshal(metadata)
 	if err != nil {
-		_ = prepared.Abort()
-		return Metadata{}, fmt.Errorf("encode Task metadata: %w", err)
+		return Metadata{}, abortPrepared(prepared, fmt.Errorf("encode Task metadata: %w", err))
 	}
 	if err := prepared.Commit(); err != nil {
-		_ = prepared.Abort()
+		err = abortPrepared(prepared, err)
+		if errors.Is(err, workspace.ErrCollision) {
+			return Metadata{}, invalid("%v", err)
+		}
 		return Metadata{}, err
 	}
+	interruptAfterWorkspaceForTest()
 	metadataPath := filepath.Join(paths.TasksDir, name+".yaml")
-	published, err := writeAtomicNew(metadataPath, contents)
+	published, publishedIdentity, err := writeAtomicNew(metadataPath, contents)
 	if err != nil {
 		var cleanupErrors []error
 		if published {
-			cleanupErrors = append(cleanupErrors, removePublishedMetadata(metadataPath))
+			cleanupErrors = append(cleanupErrors, removePublishedMetadata(metadataPath, publishedIdentity, contents))
 		}
 		cleanupErrors = append(cleanupErrors, prepared.Abort())
 		cleanupError := errors.Join(cleanupErrors...)
@@ -159,13 +166,20 @@ func ensureAvailable(paths config.Paths, name string) error {
 		if strings.EqualFold(existingName, name) {
 			return invalid("Task %q already exists", existingName)
 		}
+		metadata, err := load(filepath.Join(paths.TasksDir, entry.Name()))
+		if err != nil {
+			return err
+		}
+		if strings.EqualFold(metadata.Name, name) {
+			return invalid("Task %q already exists", metadata.Name)
+		}
 	}
 	workspaces, err := os.ReadDir(paths.Workspaces)
 	if err != nil {
 		return fmt.Errorf("inspect Task Workspaces: %w", err)
 	}
 	for _, entry := range workspaces {
-		if strings.EqualFold(entry.Name(), name) {
+		if strings.EqualFold(entry.Name(), name) && entry.Name() != name {
 			return invalid("Task Workspace collision for %q at %q", name, filepath.Join(paths.Workspaces, entry.Name()))
 		}
 	}
@@ -193,6 +207,10 @@ func load(path string) (Metadata, error) {
 	if err := ValidateName(metadata.Name); err != nil {
 		return Metadata{}, err
 	}
+	filenameName := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
+	if metadata.Name != filenameName {
+		return Metadata{}, invalid("Task metadata %q names Task %q; expected %q", path, metadata.Name, filenameName)
+	}
 	if metadata.State != StateReady {
 		return Metadata{}, invalid("unsupported Task state %q in %q", metadata.State, path)
 	}
@@ -203,11 +221,11 @@ func lockPath(paths config.Paths, name string) string {
 	return filepath.Join(paths.TasksDir, "."+strings.ToLower(name)+".lock")
 }
 
-func writeAtomicNew(path string, contents []byte) (bool, error) {
+func writeAtomicNew(path string, contents []byte) (bool, os.FileInfo, error) {
 	directory := filepath.Dir(path)
 	temporary, err := os.CreateTemp(directory, ".task.yaml-*")
 	if err != nil {
-		return false, err
+		return false, nil, err
 	}
 	temporaryPath := temporary.Name()
 	defer func() {
@@ -217,41 +235,57 @@ func writeAtomicNew(path string, contents []byte) (bool, error) {
 		}
 	}()
 	if err := temporary.Chmod(0o600); err != nil {
-		return false, err
+		return false, nil, err
 	}
 	if _, err := temporary.Write(contents); err != nil {
-		return false, err
+		return false, nil, err
 	}
 	if err := temporary.Sync(); err != nil {
-		return false, err
+		return false, nil, err
 	}
 	if err := temporary.Close(); err != nil {
-		return false, err
+		return false, nil, err
 	}
-	if err := os.Link(temporaryPath, path); err != nil {
-		return false, err
-	}
-	if err := os.Remove(temporaryPath); err != nil {
-		return true, err
+	if err := fileutil.RenameExclusive(temporaryPath, path); err != nil {
+		return false, nil, err
 	}
 	temporaryPath = ""
-	return true, syncDirectory(directory)
+	publishedIdentity, err := os.Lstat(path)
+	if err != nil {
+		return true, nil, err
+	}
+	return true, publishedIdentity, fileutil.SyncDirectory(directory)
 }
 
-func removePublishedMetadata(path string) error {
-	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+func removePublishedMetadata(path string, expected os.FileInfo, contents []byte) error {
+	current, err := os.Lstat(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
 		return err
 	}
-	return syncDirectory(filepath.Dir(path))
-}
-
-func syncDirectory(path string) error {
-	directory, err := os.Open(path)
+	if expected == nil || !os.SameFile(expected, current) || !current.Mode().IsRegular() {
+		return fmt.Errorf("refuse to remove changed Task metadata %q", path)
+	}
+	observed, err := os.ReadFile(path)
 	if err != nil {
 		return err
 	}
-	defer directory.Close()
-	return directory.Sync()
+	if !bytes.Equal(observed, contents) {
+		return fmt.Errorf("refuse to remove changed Task metadata %q", path)
+	}
+	if err := os.Remove(path); err != nil {
+		return err
+	}
+	return fileutil.SyncDirectory(filepath.Dir(path))
+}
+
+func abortPrepared(prepared *workspace.Prepared, cause error) error {
+	if cleanupError := prepared.Abort(); cleanupError != nil {
+		return errors.Join(cause, fmt.Errorf("roll back Task Workspace: %w", cleanupError))
+	}
+	return cause
 }
 
 func invalid(format string, arguments ...any) error {

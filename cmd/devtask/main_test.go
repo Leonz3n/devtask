@@ -41,10 +41,19 @@ type persistedTask struct {
 }
 
 func devtaskBinary(t *testing.T) string {
+	return devtaskBinaryWithTags(t, "")
+}
+
+func devtaskBinaryWithTags(t *testing.T, tags string) string {
 	t.Helper()
 
 	binary := filepath.Join(t.TempDir(), "devtask")
-	command := exec.Command("go", "build", "-o", binary, ".")
+	arguments := []string{"build"}
+	if tags != "" {
+		arguments = append(arguments, "-tags", tags)
+	}
+	arguments = append(arguments, "-o", binary, ".")
+	command := exec.Command("go", arguments...)
 	_, filename, _, ok := runtime.Caller(0)
 	if !ok {
 		t.Fatal("locate test source")
@@ -937,9 +946,9 @@ func TestNewRejectsFilesystemCollisionsWithoutOverwritingThem(t *testing.T) {
 		}
 	})
 
-	t.Run("case-insensitive Task Workspace", func(t *testing.T) {
+	t.Run("unowned Task Workspace", func(t *testing.T) {
 		environment := initializedCLIEnvironment(t)
-		workspace := filepath.Join(environment.dataHome, "devtask", "workspaces", "Billing")
+		workspace := filepath.Join(environment.dataHome, "devtask", "workspaces", "billing")
 		if err := os.Mkdir(workspace, 0o700); err != nil {
 			t.Fatal(err)
 		}
@@ -960,6 +969,48 @@ func TestNewRejectsFilesystemCollisionsWithoutOverwritingThem(t *testing.T) {
 			t.Fatal("workspace collision created Task metadata")
 		}
 	})
+}
+
+func TestNewReportsWorkspaceFilesystemFailureAsOperational(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("devtask v1 supports macOS and Linux")
+	}
+	environment := initializedCLIEnvironment(t)
+	workspaceRoot := filepath.Join(environment.dataHome, "devtask", "workspaces")
+	if err := os.Chmod(workspaceRoot, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(workspaceRoot, 0o700) })
+
+	result := environment.run(t, "new", "billing")
+
+	if result.code != 1 {
+		t.Fatalf("exit code = %d, want operational exit 1; stderr: %s", result.code, result.stderr)
+	}
+	if !strings.Contains(result.stderr, "prepare Task Workspace") {
+		t.Fatalf("stderr = %q, want Task Workspace filesystem diagnostic", result.stderr)
+	}
+}
+
+func TestListRejectsTaskMetadataWhoseFilenameDoesNotMatchItsName(t *testing.T) {
+	environment := initializedCLIEnvironment(t)
+	created := environment.run(t, "new", "Billing")
+	if created.code != 0 {
+		t.Fatalf("new failed: %s", created.stderr)
+	}
+	tasksDirectory := filepath.Join(environment.dataHome, "devtask", "tasks")
+	if err := os.Rename(filepath.Join(tasksDirectory, "Billing.yaml"), filepath.Join(tasksDirectory, "other.yaml")); err != nil {
+		t.Fatal(err)
+	}
+
+	result := environment.run(t, "list")
+
+	if result.code != 2 {
+		t.Fatalf("exit code = %d, want validation exit 2; stderr: %s", result.code, result.stderr)
+	}
+	if !strings.Contains(result.stderr, "names Task \"Billing\"; expected \"other\"") {
+		t.Fatalf("stderr = %q, want metadata identity diagnostic", result.stderr)
+	}
 }
 
 func TestNewRollsBackWorkspaceWhenMetadataCannotBeWritten(t *testing.T) {
@@ -993,6 +1044,156 @@ func TestNewRollsBackWorkspaceWhenMetadataCannotBeWritten(t *testing.T) {
 		t.Fatal(err)
 	} else if len(entries) != 0 {
 		t.Fatalf("failed new left Task Workspace state: %#v", entries)
+	}
+}
+
+func TestNewRecoversWorkspacePublishedBeforeMetadata(t *testing.T) {
+	environment := initializedCLIEnvironment(t)
+	first := environment.run(t, "new", "billing")
+	if first.code != 0 {
+		t.Fatalf("initial new failed: %s", first.stderr)
+	}
+	metadataPath := filepath.Join(environment.dataHome, "devtask", "tasks", "billing.yaml")
+	if err := os.Remove(metadataPath); err != nil {
+		t.Fatal(err)
+	}
+	workspace := filepath.Join(environment.dataHome, "devtask", "workspaces", "billing")
+	taskDocumentPath := filepath.Join(workspace, "TASK.md")
+	before, err := os.ReadFile(taskDocumentPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	recovered := environment.run(t, "new", "billing")
+
+	if recovered.code != 0 {
+		t.Fatalf("recovering new failed: %s", recovered.stderr)
+	}
+	after, err := os.ReadFile(taskDocumentPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(after, before) {
+		t.Fatalf("recovery rewrote TASK.md:\nbefore: %s\nafter: %s", before, after)
+	}
+	metadata := readPersistedTask(t, environment, "billing")
+	if metadata.State != "ready" || metadata.TaskBranchName != "feat/billing" {
+		t.Fatalf("recovered Task metadata = %#v", metadata)
+	}
+}
+
+func TestNewRecoversAfterProcessInterruptionAtWorkspacePublication(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("devtask v1 supports macOS and Linux")
+	}
+	environment := initializedCLIEnvironment(t)
+	binary := devtaskBinaryWithTags(t, "devtask_test")
+	command := exec.Command(binary, "new", "billing")
+	command.Dir = environment.home
+	command.Env = append(filteredEnvironment(os.Environ()),
+		"HOME="+environment.home,
+		"XDG_CONFIG_HOME="+environment.configHome,
+		"XDG_DATA_HOME="+environment.dataHome,
+		"DEVTASK_TEST_INTERRUPT_AFTER_WORKSPACE=1",
+	)
+	if err := command.Run(); err == nil {
+		t.Fatal("fault-enabled new completed instead of being interrupted")
+	}
+	metadataPath := filepath.Join(environment.dataHome, "devtask", "tasks", "billing.yaml")
+	if _, err := os.Stat(metadataPath); !os.IsNotExist(err) {
+		t.Fatal("interrupted new published Task metadata")
+	}
+	taskDocumentPath := filepath.Join(environment.dataHome, "devtask", "workspaces", "billing", "TASK.md")
+	before, err := os.ReadFile(taskDocumentPath)
+	if err != nil {
+		t.Fatalf("interrupted new did not leave the published Task Workspace: %v", err)
+	}
+
+	recovered := environment.run(t, "new", "billing")
+
+	if recovered.code != 0 {
+		t.Fatalf("new did not recover after interruption: %s", recovered.stderr)
+	}
+	after, err := os.ReadFile(taskDocumentPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(after, before) {
+		t.Fatalf("recovery rewrote TASK.md:\nbefore: %s\nafter: %s", before, after)
+	}
+	if metadata := readPersistedTask(t, environment, "billing"); metadata.State != "ready" {
+		t.Fatalf("recovered Task state = %q, want ready", metadata.State)
+	}
+}
+
+func TestNewDoesNotDeleteWorkspaceChangedBeforeCompensation(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("devtask v1 supports macOS and Linux")
+	}
+	environment := initializedCLIEnvironment(t)
+	binary := devtaskBinaryWithTags(t, "devtask_test")
+	signalPath := filepath.Join(t.TempDir(), "workspace-published")
+	command := exec.Command(binary, "new", "billing")
+	command.Dir = environment.home
+	command.Env = append(filteredEnvironment(os.Environ()),
+		"HOME="+environment.home,
+		"XDG_CONFIG_HOME="+environment.configHome,
+		"XDG_DATA_HOME="+environment.dataHome,
+		"DEVTASK_TEST_PAUSE_AFTER_WORKSPACE="+signalPath,
+	)
+	var stderr bytes.Buffer
+	command.Stderr = &stderr
+	if err := command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if command.ProcessState == nil {
+			_ = command.Process.Kill()
+			_ = command.Wait()
+		}
+	})
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if _, err := os.Stat(signalPath + ".ready"); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("new did not reach the Workspace publication boundary")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	workspace := filepath.Join(environment.dataHome, "devtask", "workspaces", "billing")
+	userFile := filepath.Join(workspace, "user.txt")
+	if err := os.WriteFile(userFile, []byte("preserve me\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tasksDirectory := filepath.Join(environment.dataHome, "devtask", "tasks")
+	if err := os.Chmod(tasksDirectory, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(signalPath+".continue", nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err := command.Wait()
+	if chmodError := os.Chmod(tasksDirectory, 0o700); chmodError != nil {
+		t.Fatal(chmodError)
+	}
+	if err == nil {
+		t.Fatal("new succeeded despite blocked metadata publication")
+	}
+	exitError, ok := err.(*exec.ExitError)
+	if !ok || exitError.ExitCode() != 1 {
+		t.Fatalf("new error = %v, want exit code 1; stderr: %s", err, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "refuse to remove changed Task Workspace") {
+		t.Fatalf("stderr = %q, want protected compensation diagnostic", stderr.String())
+	}
+	if contents, err := os.ReadFile(userFile); err != nil || string(contents) != "preserve me\n" {
+		t.Fatalf("compensation removed changed Workspace content: contents=%q error=%v", contents, err)
+	}
+	if _, err := os.Stat(filepath.Join(tasksDirectory, "billing.yaml")); !os.IsNotExist(err) {
+		t.Fatal("failed metadata publication left Task metadata")
 	}
 }
 
