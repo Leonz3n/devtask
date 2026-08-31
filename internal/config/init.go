@@ -90,20 +90,43 @@ func writeAtomicChecked(path string, contents []byte, mode os.FileMode, original
 		if err := exchangeFiles(temporaryPath, path); err != nil {
 			return fmt.Errorf("atomically exchange configuration: %w", err)
 		}
+		// After the exchange, the temporary path owns user data. It must only be
+		// removed explicitly after validation or after a successful rollback.
+		keep = true
 		displaced, err := os.ReadFile(temporaryPath)
 		if err != nil {
-			if rollbackError := exchangeFiles(temporaryPath, path); rollbackError != nil {
+			if rollbackError := restoreDisplacedConfiguration(temporaryPath, path, directory); rollbackError != nil {
 				return fmt.Errorf("inspect displaced configuration: %v; restore it: %w", err, rollbackError)
 			}
 			return fmt.Errorf("inspect displaced configuration: %w", err)
 		}
 		if !bytes.Equal(displaced, original) {
-			if err := exchangeFiles(temporaryPath, path); err != nil {
+			if err := restoreDisplacedConfiguration(temporaryPath, path, directory); err != nil {
 				return fmt.Errorf("%w; restore external edit: %v", ErrConcurrentEdit, err)
 			}
 			return ErrConcurrentEdit
 		}
+		if err := removeAndSync(temporaryPath, directory); err != nil {
+			return fmt.Errorf("remove displaced configuration: %w", err)
+		}
 	}
+	return syncDirectory(directory)
+}
+
+func restoreDisplacedConfiguration(temporaryPath, path, directory string) error {
+	if err := exchangeFiles(temporaryPath, path); err != nil {
+		return err
+	}
+	return removeAndSync(temporaryPath, directory)
+}
+
+func removeAndSync(path, directory string) error {
+	removeError := os.Remove(path)
+	syncError := syncDirectory(directory)
+	return errors.Join(removeError, syncError)
+}
+
+func syncDirectory(directory string) error {
 	dir, err := os.Open(directory)
 	if err != nil {
 		return err
