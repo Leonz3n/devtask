@@ -76,7 +76,10 @@ func AddRepositories(paths config.Paths, configuration config.Config, taskName s
 		return nil, err
 	}
 	defer taskLock.Close()
+	return addRepositoriesLocked(paths, configuration, taskName, repositoryAliases, baseOverride, fetchOverride)
+}
 
+func addRepositoriesLocked(paths config.Paths, configuration config.Config, taskName string, repositoryAliases []string, baseOverride *string, fetchOverride *bool) ([]AddResult, error) {
 	metadataPath, originalMetadata, metadata, err := loadForUpdate(paths, taskName)
 	if err != nil {
 		return nil, err

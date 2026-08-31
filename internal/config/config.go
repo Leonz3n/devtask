@@ -61,6 +61,63 @@ type RepositoryConfig struct {
 	SharedPaths []string `yaml:"shared_paths,omitempty"`
 }
 
+func (configuration Config) ExpandRepositoryGroup(name string, exclusions, additions []string) ([]string, error) {
+	groupName := ""
+	var groupAliases []string
+	for configuredName, aliases := range configuration.Groups {
+		if strings.EqualFold(configuredName, name) {
+			groupName = configuredName
+			groupAliases = aliases
+			break
+		}
+	}
+	if groupName == "" {
+		return nil, invalid("unknown Repository Group %q", name)
+	}
+
+	canonicalAliases := make(map[string]string, len(configuration.Repositories))
+	for alias := range configuration.Repositories {
+		canonicalAliases[strings.ToLower(alias)] = alias
+	}
+	groupMembers := make(map[string]struct{}, len(groupAliases))
+	for _, alias := range groupAliases {
+		groupMembers[strings.ToLower(alias)] = struct{}{}
+	}
+	excluded := make(map[string]struct{}, len(exclusions))
+	for _, requested := range exclusions {
+		folded := strings.ToLower(requested)
+		if _, exists := groupMembers[folded]; !exists {
+			return nil, invalid("Repository Alias %q is not a member of Repository Group %q", requested, groupName)
+		}
+		excluded[folded] = struct{}{}
+	}
+	for _, requested := range additions {
+		if _, exists := canonicalAliases[strings.ToLower(requested)]; !exists {
+			return nil, invalid("unknown repository alias %q", requested)
+		}
+	}
+
+	selected := make([]string, 0, len(groupAliases)+len(additions))
+	seen := make(map[string]struct{}, len(groupAliases)+len(additions))
+	appendAlias := func(requested string) {
+		folded := strings.ToLower(requested)
+		if _, duplicate := seen[folded]; duplicate {
+			return
+		}
+		seen[folded] = struct{}{}
+		selected = append(selected, canonicalAliases[folded])
+	}
+	for _, alias := range groupAliases {
+		if _, skip := excluded[strings.ToLower(alias)]; !skip {
+			appendAlias(alias)
+		}
+	}
+	for _, alias := range additions {
+		appendAlias(alias)
+	}
+	return selected, nil
+}
+
 func Default() Config {
 	return Config{
 		SchemaVersion: SchemaVersion,

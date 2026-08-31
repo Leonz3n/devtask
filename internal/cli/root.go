@@ -59,7 +59,7 @@ func NewRootCommand(stdout, stderr io.Writer) *cobra.Command {
 	})
 	root.AddCommand(newInitCommand(stdout))
 	root.AddCommand(newRepoCommand(stdout))
-	root.AddCommand(newTaskCommand(stdout), newTaskListCommand(stdout), newTaskAddCommand(stdout, stderr), newTaskStatusCommand(stdout), newTaskRemoveRepositoryCommand(stdout))
+	root.AddCommand(newTaskCommand(stdout, stderr), newTaskListCommand(stdout), newTaskAddCommand(stdout, stderr), newTaskStatusCommand(stdout), newTaskRemoveRepositoryCommand(stdout))
 	root.AddCommand(
 		newAgentLauncherCommand(launcher.Pi, os.Stdin, stdout, stderr),
 		newAgentLauncherCommand(launcher.Claude, os.Stdin, stdout, stderr),
@@ -353,26 +353,7 @@ func newTaskAddCommand(stdout, stderr io.Writer) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			for _, result := range results {
-				for _, warning := range result.Warnings {
-					if _, err = fmt.Fprintf(stderr, "warning: repository %s: %s\n", result.Attachment.Alias, warning); err != nil {
-						return err
-					}
-				}
-				action := "attached"
-				if result.AlreadyAttached {
-					action = "already attached"
-				}
-				if _, err = fmt.Fprintf(stdout, "%s %s to Task %s at %s\n", action, result.Attachment.Alias, result.TaskName, result.Attachment.WorktreePath); err != nil {
-					return err
-				}
-				if !result.AlreadyAttached && result.Attachment.BranchExisted {
-					if _, err = fmt.Fprintln(stdout, "existing Task Branch attached; Base Ref was not applied"); err != nil {
-						return err
-					}
-				}
-			}
-			return nil
+			return writeAddResults(stdout, stderr, results)
 		},
 	}
 	command.Flags().StringVar(&base, "base", "", "branch name used to resolve the Base Ref for a new Task Branch")
@@ -382,14 +363,26 @@ func newTaskAddCommand(stdout, stderr io.Writer) *cobra.Command {
 	return command
 }
 
-func newTaskCommand(stdout io.Writer) *cobra.Command {
+func newTaskCommand(stdout, stderr io.Writer) *cobra.Command {
 	var branch string
+	var group string
+	var exclusions []string
+	var additions []string
+	var base string
+	var fetch bool
+	var noFetch bool
 	command := &cobra.Command{
 		Use:   "new <task>",
-		Short: "Create an empty Task",
+		Short: "Create a Task",
 		Args: func(cmd *cobra.Command, args []string) error {
 			if err := cobra.ExactArgs(1)(cmd, args); err != nil {
 				return &validationError{err: err}
+			}
+			if cmd.Flags().Changed("fetch") && cmd.Flags().Changed("no-fetch") {
+				return &validationError{err: errors.New("--fetch and --no-fetch are mutually exclusive")}
+			}
+			if !cmd.Flags().Changed("group") && (cmd.Flags().Changed("exclude") || cmd.Flags().Changed("add") || cmd.Flags().Changed("base") || cmd.Flags().Changed("fetch") || cmd.Flags().Changed("no-fetch")) {
+				return &validationError{err: errors.New("--exclude, --add, --base, --fetch, and --no-fetch require --group")}
 			}
 			return nil
 		},
@@ -406,16 +399,71 @@ func newTaskCommand(stdout io.Writer) *cobra.Command {
 			if cmd.Flags().Changed("branch") {
 				branchOverride = &branch
 			}
-			metadata, err := task.Create(paths, configuration, args[0], branchOverride)
+			if !cmd.Flags().Changed("group") {
+				metadata, err := task.Create(paths, configuration, args[0], branchOverride)
+				if err != nil {
+					return err
+				}
+				_, err = fmt.Fprintf(stdout, "created Task %s with Task Branch Name %s\n", metadata.Name, metadata.TaskBranchName)
+				return err
+			}
+			repositoryAliases, err := configuration.ExpandRepositoryGroup(group, exclusions, additions)
 			if err != nil {
 				return err
 			}
-			_, err = fmt.Fprintf(stdout, "created Task %s with Task Branch Name %s\n", metadata.Name, metadata.TaskBranchName)
-			return err
+			var baseOverride *string
+			if cmd.Flags().Changed("base") {
+				baseOverride = &base
+			}
+			var fetchOverride *bool
+			if cmd.Flags().Changed("fetch") {
+				fetchOverride = &fetch
+			} else if cmd.Flags().Changed("no-fetch") {
+				override := !noFetch
+				fetchOverride = &override
+			}
+			result, err := task.CreateWithRepositories(paths, configuration, args[0], branchOverride, repositoryAliases, baseOverride, fetchOverride)
+			if err != nil {
+				return err
+			}
+			if _, err = fmt.Fprintf(stdout, "created Task %s with Task Branch Name %s\n", result.Metadata.Name, result.Metadata.TaskBranchName); err != nil {
+				return err
+			}
+			return writeAddResults(stdout, stderr, result.Attachments)
 		},
 	}
 	command.Flags().StringVar(&branch, "branch", "", "override the Task Branch Name")
+	command.Flags().StringVar(&group, "group", "", "create ordered Repository Attachments from a Repository Group")
+	command.Flags().StringArrayVar(&exclusions, "exclude", nil, "exclude a Repository Alias from the selected Repository Group")
+	command.Flags().StringArrayVar(&additions, "add", nil, "append a Registered Repository to the selected Repository Group")
+	command.Flags().StringVar(&base, "base", "", "branch name used to resolve the Base Ref for new Task Branches")
+	command.Flags().BoolVar(&fetch, "fetch", false, "fetch configured remotes before resolving Base Refs")
+	command.Flags().BoolVar(&noFetch, "no-fetch", false, "use current refs without fetching")
+	command.MarkFlagsMutuallyExclusive("fetch", "no-fetch")
 	return command
+}
+
+func writeAddResults(stdout, stderr io.Writer, results []task.AddResult) error {
+	for _, result := range results {
+		for _, warning := range result.Warnings {
+			if _, err := fmt.Fprintf(stderr, "warning: repository %s: %s\n", result.Attachment.Alias, warning); err != nil {
+				return err
+			}
+		}
+		action := "attached"
+		if result.AlreadyAttached {
+			action = "already attached"
+		}
+		if _, err := fmt.Fprintf(stdout, "%s %s to Task %s at %s\n", action, result.Attachment.Alias, result.TaskName, result.Attachment.WorktreePath); err != nil {
+			return err
+		}
+		if !result.AlreadyAttached && result.Attachment.BranchExisted {
+			if _, err := fmt.Fprintln(stdout, "existing Task Branch attached; Base Ref was not applied"); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func newTaskListCommand(stdout io.Writer) *cobra.Command {

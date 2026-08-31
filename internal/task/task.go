@@ -73,6 +73,14 @@ type Summary struct {
 	CreatedAt       time.Time `json:"created_at"`
 }
 
+type taskCreation struct {
+	metadata         Metadata
+	metadataPath     string
+	metadataContents []byte
+	metadataIdentity os.FileInfo
+	workspace        *workspace.Prepared
+}
+
 func Create(paths config.Paths, configuration config.Config, name string, branchOverride *string) (Metadata, error) {
 	if err := ValidateName(name); err != nil {
 		return Metadata{}, err
@@ -85,29 +93,37 @@ func Create(paths config.Paths, configuration config.Config, name string, branch
 		return Metadata{}, err
 	}
 	defer taskLock.Close()
-
-	if err := ensureAvailable(paths, name); err != nil {
+	creation, err := createLocked(paths, configuration, name, branchOverride)
+	if err != nil {
 		return Metadata{}, err
 	}
+	return creation.metadata, nil
+}
+
+func createLocked(paths config.Paths, configuration config.Config, name string, branchOverride *string) (*taskCreation, error) {
+	if err := ensureAvailable(paths, name); err != nil {
+		return nil, err
+	}
 	branchName := ""
+	var err error
 	if branchOverride == nil {
 		branchName, err = config.RenderTaskBranchName(configuration.Defaults.BranchPattern, name)
 		if err != nil {
-			return Metadata{}, err
+			return nil, err
 		}
 	} else {
 		branchName = *branchOverride
 	}
 	if err := gitcmd.ValidateBranchName(branchName); err != nil {
-		return Metadata{}, invalid("%v", err)
+		return nil, invalid("%v", err)
 	}
 
 	prepared, err := workspace.Prepare(paths.Workspaces, name, branchName)
 	if err != nil {
 		if errors.Is(err, workspace.ErrCollision) {
-			return Metadata{}, invalid("%v", err)
+			return nil, invalid("%v", err)
 		}
-		return Metadata{}, err
+		return nil, err
 	}
 	metadata := Metadata{
 		SchemaVersion:  SchemaVersion,
@@ -120,14 +136,14 @@ func Create(paths config.Paths, configuration config.Config, name string, branch
 	}
 	contents, err := yaml.Marshal(metadata)
 	if err != nil {
-		return Metadata{}, abortPrepared(prepared, fmt.Errorf("encode Task metadata: %w", err))
+		return nil, abortPrepared(prepared, fmt.Errorf("encode Task metadata: %w", err))
 	}
 	if err := prepared.Commit(); err != nil {
 		err = abortPrepared(prepared, err)
 		if errors.Is(err, workspace.ErrCollision) {
-			return Metadata{}, invalid("%v", err)
+			return nil, invalid("%v", err)
 		}
-		return Metadata{}, err
+		return nil, err
 	}
 	interruptAfterWorkspaceForTest()
 	metadataPath := filepath.Join(paths.TasksDir, name+".yaml")
@@ -140,14 +156,20 @@ func Create(paths config.Paths, configuration config.Config, name string, branch
 		cleanupErrors = append(cleanupErrors, prepared.Abort())
 		cleanupError := errors.Join(cleanupErrors...)
 		if cleanupError != nil {
-			return Metadata{}, fmt.Errorf("write Task metadata: %v; roll back Task creation: %w", err, cleanupError)
+			return nil, fmt.Errorf("write Task metadata: %v; roll back Task creation: %w", err, cleanupError)
 		}
 		if errors.Is(err, os.ErrExist) {
-			return Metadata{}, invalid("Task metadata collision at %q", metadataPath)
+			return nil, invalid("Task metadata collision at %q", metadataPath)
 		}
-		return Metadata{}, fmt.Errorf("write Task metadata: %w", err)
+		return nil, fmt.Errorf("write Task metadata: %w", err)
 	}
-	return metadata, nil
+	return &taskCreation{
+		metadata:         metadata,
+		metadataPath:     metadataPath,
+		metadataContents: contents,
+		metadataIdentity: publishedIdentity,
+		workspace:        prepared,
+	}, nil
 }
 
 func List(paths config.Paths) ([]Summary, error) {
