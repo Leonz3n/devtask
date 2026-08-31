@@ -19,19 +19,19 @@ import (
 )
 
 type RemoveOptions struct {
-	Force        bool
-	DeleteBranch bool
-	Fetch        *bool
+	Force            bool
+	DeleteTaskBranch bool
+	Fetch            *bool
 }
 
 type RemoveAttachmentResult struct {
-	RepositoryAlias string
-	WorktreePath    string
-	TaskBranchName  string
-	WorktreeRemoved bool
-	BranchDeleted   bool
-	Completed       bool
-	ResidualObjects []string
+	RepositoryAlias   string
+	WorktreePath      string
+	TaskBranchName    string
+	WorktreeRemoved   bool
+	TaskBranchDeleted bool
+	Completed         bool
+	ResidualObjects   []string
 }
 
 type RemoveResult struct {
@@ -42,7 +42,7 @@ type RemoveResult struct {
 type taskRemovalPlan struct {
 	attachment RepositoryAttachment
 	worktree   os.FileInfo
-	branch     *branchRemovalPlan
+	taskBranch *taskBranchRemovalPlan
 }
 
 type taskRemovalProgress struct {
@@ -126,15 +126,18 @@ func Remove(paths config.Paths, configuration config.Config, taskName string, op
 			}
 		}
 		plan := taskRemovalPlan{attachment: attachment, worktree: worktreeInfo}
-		if options.DeleteBranch {
-			branch, err := prepareBranchRemoval(configuration, attachment, options.Fetch, options.Force)
+		if options.DeleteTaskBranch {
+			taskBranch, err := prepareTaskBranchRemoval(configuration, attachment, options.Fetch, options.Force)
 			if err != nil {
 				blockers = append(blockers, err)
 			} else {
-				plan.branch = &branch
+				plan.taskBranch = &taskBranch
 			}
 		}
 		plans = append(plans, plan)
+	}
+	if !options.Force && workspaceInfo != nil {
+		blockers = append(blockers, preflightTaskWorkspaceProjections(workspacePath, metadata)...)
 	}
 	if len(blockers) > 0 {
 		return result, errors.Join(blockers...)
@@ -167,26 +170,35 @@ func Remove(paths config.Paths, configuration config.Config, taskName string, op
 	for _, plan := range plans {
 		attachmentResult := RemoveAttachmentResult{RepositoryAlias: plan.attachment.Alias, WorktreePath: plan.attachment.WorktreePath, TaskBranchName: plan.attachment.TaskBranchName}
 		if err := beforeTaskAttachmentRemovalForTest(plan.attachment.Alias); err != nil {
-			return result, progress.fail(err, &plan.attachment)
+			return result, progress.stop(err, &plan.attachment)
 		}
 		if err := recheckRemovalIdentity(metadata, plan.attachment, plan.worktree); err != nil {
-			return result, progress.fail(err, &plan.attachment)
+			return result, progress.stop(err, &plan.attachment)
 		}
 		protected, err := protectedWorktreeContent(plan.attachment)
 		if err != nil {
-			return result, progress.fail(fmt.Errorf("recheck protected content for Repository Attachment %q: %w", plan.attachment.Alias, err), &plan.attachment)
+			return result, progress.stop(fmt.Errorf("recheck protected content for Repository Attachment %q: %w", plan.attachment.Alias, err), &plan.attachment)
 		}
 		if len(protected) > 0 && !options.Force {
-			return result, progress.fail(invalid("Repository Attachment %q gained protected Task Worktree content before deletion (%s)", plan.attachment.Alias, strings.Join(protected, ", ")), &plan.attachment)
+			return result, progress.stop(invalid("Repository Attachment %q gained protected Task Worktree content before deletion (%s)", plan.attachment.Alias, strings.Join(protected, ", ")), &plan.attachment)
 		}
 		remainingAttachments := removeAttachmentByAlias(metadata.Attachments, plan.attachment.Alias)
-		remainingProjection := make([]workspace.Attachment, 0, len(remainingAttachments))
-		for _, remaining := range remainingAttachments {
-			remainingProjection = append(remainingProjection, workspace.Attachment{Alias: remaining.Alias, WorktreePath: remaining.WorktreePath})
-		}
-		projection, err := workspace.PrepareRemovalProjection(workspacePath, metadata.Name, metadata.TaskBranchName, workspace.Attachment{Alias: plan.attachment.Alias, WorktreePath: plan.attachment.WorktreePath}, remainingProjection, false)
-		if err != nil {
-			return result, progress.fail(invalid("cannot remove Repository Attachment %q Task Workspace projection: %v", plan.attachment.Alias, err), &plan.attachment)
+		remainingProjection := workspaceAttachments(remainingAttachments)
+		var commitProjection func() error
+		var refreshContextFiles func([]workspace.ContextFile) []workspace.ContextFile
+		if options.Force {
+			projection, err := workspace.PrepareRemovalLinkProjection(workspacePath, workspace.Attachment{Alias: plan.attachment.Alias, WorktreePath: plan.attachment.WorktreePath})
+			if err != nil {
+				return result, progress.stop(invalid("cannot remove Repository Attachment %q Task Workspace link: %v", plan.attachment.Alias, err), &plan.attachment)
+			}
+			commitProjection = projection.Commit
+		} else {
+			projection, err := workspace.PrepareRemovalProjection(workspacePath, metadata.Name, metadata.TaskBranchName, workspace.Attachment{Alias: plan.attachment.Alias, WorktreePath: plan.attachment.WorktreePath}, remainingProjection, false)
+			if err != nil {
+				return result, progress.stop(invalid("cannot remove Repository Attachment %q Task Workspace projection: %v", plan.attachment.Alias, err), &plan.attachment)
+			}
+			commitProjection = projection.Commit
+			refreshContextFiles = projection.RefreshOwnedContextFiles
 		}
 		if err := gitcmd.RemoveWorktree(plan.attachment.MainCheckout, plan.attachment.WorktreePath); err != nil {
 			return result, progress.fail(fmt.Errorf("remove Task Worktree for Repository Attachment %q: %w", plan.attachment.Alias, err), &plan.attachment)
@@ -199,19 +211,21 @@ func Remove(paths config.Paths, configuration config.Config, taskName string, op
 		if err := afterTaskAttachmentWorktreeRemovalForTest(plan.attachment.Alias); err != nil {
 			return result, progress.fail(err, &plan.attachment)
 		}
-		if options.DeleteBranch {
-			if err := plan.branch.remove(plan.attachment, options.Force); err != nil {
+		if options.DeleteTaskBranch {
+			if err := plan.taskBranch.deleteTaskBranch(plan.attachment, options.Force); err != nil {
 				return result, progress.fail(fmt.Errorf("delete Task Branch Name %q for Repository Attachment %q: %w", plan.attachment.TaskBranchName, plan.attachment.Alias, err), &plan.attachment)
 			}
-			result.Attachments[len(result.Attachments)-1].BranchDeleted = true
+			result.Attachments[len(result.Attachments)-1].TaskBranchDeleted = true
 			if err := progress.checkpoint(&plan.attachment, "Task Branch Name deletion completed; Repository Attachment metadata cleanup is pending"); err != nil {
 				return result, err
 			}
 		}
-		if err := projection.Commit(); err != nil {
+		if err := commitProjection(); err != nil {
 			return result, progress.fail(fmt.Errorf("remove Repository Attachment %q Task Workspace projection: %w", plan.attachment.Alias, err), &plan.attachment)
 		}
-		metadata.ContextFiles = projection.RefreshOwnedContextFiles(metadata.ContextFiles)
+		if refreshContextFiles != nil {
+			metadata.ContextFiles = refreshContextFiles(metadata.ContextFiles)
+		}
 		if err := progress.checkpoint(&plan.attachment, "Task Workspace projection removal completed; Repository Attachment metadata cleanup is pending"); err != nil {
 			return result, err
 		}
@@ -278,6 +292,26 @@ func taskRemovalLockTargets(metadata Metadata) ([]*repositoryLockTarget, error) 
 	}
 	sort.Slice(targets, func(i, j int) bool { return targets[i].path < targets[j].path })
 	return targets, nil
+}
+
+func preflightTaskWorkspaceProjections(workspacePath string, metadata Metadata) []error {
+	blockers := make([]error, 0)
+	for _, attachment := range metadata.Attachments {
+		remaining := removeAttachmentByAlias(metadata.Attachments, attachment.Alias)
+		_, err := workspace.PrepareRemovalProjection(workspacePath, metadata.Name, metadata.TaskBranchName, workspace.Attachment{Alias: attachment.Alias, WorktreePath: attachment.WorktreePath}, workspaceAttachments(remaining), false)
+		if err != nil {
+			blockers = append(blockers, invalid("cannot remove Repository Attachment %q Task Workspace projection: %v", attachment.Alias, err))
+		}
+	}
+	return blockers
+}
+
+func workspaceAttachments(attachments []RepositoryAttachment) []workspace.Attachment {
+	projection := make([]workspace.Attachment, 0, len(attachments))
+	for _, attachment := range attachments {
+		projection = append(projection, workspace.Attachment{Alias: attachment.Alias, WorktreePath: attachment.WorktreePath})
+	}
+	return projection
 }
 
 func preflightTaskWorkspace(paths config.Paths, metadata Metadata) (os.FileInfo, []string, error) {
@@ -404,6 +438,13 @@ func (progress *taskRemovalProgress) fail(cause error, failed *RepositoryAttachm
 		return fmt.Errorf("%v; persist incomplete Task removal state: %w", cause, err)
 	}
 	return fmt.Errorf("%v; Task %q is incomplete; %s", cause, progress.metadata.Name, taskRemovalSummary(*progress.result, failed, progress.metadata))
+}
+
+func (progress *taskRemovalProgress) stop(cause error, failed *RepositoryAttachment) error {
+	if len(progress.result.Attachments) == 0 {
+		return cause
+	}
+	return progress.fail(cause, failed)
 }
 
 func taskRemovalSummary(result RemoveResult, failed *RepositoryAttachment, metadata *Metadata) string {

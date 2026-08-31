@@ -70,7 +70,7 @@ func NewRootCommand(stdout, stderr io.Writer) *cobra.Command {
 
 func newTaskRemoveCommand(stdout io.Writer) *cobra.Command {
 	var force bool
-	var deleteBranch bool
+	var deleteTaskBranch bool
 	var fetch bool
 	var noFetch bool
 	command := &cobra.Command{
@@ -101,14 +101,14 @@ func newTaskRemoveCommand(stdout io.Writer) *cobra.Command {
 				override := !noFetch
 				fetchOverride = &override
 			}
-			result, removeError := task.Remove(paths, configuration, args[0], task.RemoveOptions{Force: force, DeleteBranch: deleteBranch, Fetch: fetchOverride})
+			result, removeError := task.Remove(paths, configuration, args[0], task.RemoveOptions{Force: force, DeleteTaskBranch: deleteTaskBranch, Fetch: fetchOverride})
 			for _, attachment := range result.Attachments {
 				if attachment.WorktreeRemoved {
 					if _, writeError := fmt.Fprintf(stdout, "removed Task Worktree for %s from Task %s at %s\n", attachment.RepositoryAlias, result.TaskName, attachment.WorktreePath); writeError != nil {
 						return writeError
 					}
 				}
-				if attachment.BranchDeleted {
+				if attachment.TaskBranchDeleted {
 					if _, writeError := fmt.Fprintf(stdout, "deleted Task Branch Name %s for %s\n", attachment.TaskBranchName, attachment.RepositoryAlias); writeError != nil {
 						return writeError
 					}
@@ -126,7 +126,7 @@ func newTaskRemoveCommand(stdout io.Writer) *cobra.Command {
 		},
 	}
 	command.Flags().BoolVar(&force, "force", false, "authorize removal of protected Task Worktree and Task Context File content")
-	command.Flags().BoolVar(&deleteBranch, "delete-branch", false, "delete each Task Branch Name after removing its Task Worktree")
+	command.Flags().BoolVar(&deleteTaskBranch, "delete-branch", false, "delete each Task Branch Name after removing its Task Worktree")
 	command.Flags().BoolVar(&fetch, "fetch", false, "fetch configured remotes before resolving current Base Refs")
 	command.Flags().BoolVar(&noFetch, "no-fetch", false, "use current refs without fetching")
 	command.MarkFlagsMutuallyExclusive("fetch", "no-fetch")
@@ -135,7 +135,7 @@ func newTaskRemoveCommand(stdout io.Writer) *cobra.Command {
 
 func newTaskRemoveRepositoryCommand(stdout io.Writer) *cobra.Command {
 	var force bool
-	var deleteBranch bool
+	var deleteTaskBranch bool
 	var forget bool
 	var fetch bool
 	var noFetch bool
@@ -149,7 +149,7 @@ func newTaskRemoveRepositoryCommand(stdout io.Writer) *cobra.Command {
 			if cmd.Flags().Changed("fetch") && cmd.Flags().Changed("no-fetch") {
 				return &validationError{err: errors.New("--fetch and --no-fetch are mutually exclusive")}
 			}
-			if forget && deleteBranch {
+			if forget && deleteTaskBranch {
 				return &validationError{err: errors.New("--forget and --delete-branch are mutually exclusive")}
 			}
 			return nil
@@ -170,7 +170,7 @@ func newTaskRemoveRepositoryCommand(stdout io.Writer) *cobra.Command {
 				override := !noFetch
 				fetchOverride = &override
 			}
-			result, err := task.RemoveRepository(paths, configuration, args[0], args[1], task.RemoveRepositoryOptions{Force: force, DeleteBranch: deleteBranch, Forget: forget, Fetch: fetchOverride})
+			result, err := task.RemoveRepository(paths, configuration, args[0], args[1], task.RemoveRepositoryOptions{Force: force, DeleteTaskBranch: deleteTaskBranch, Forget: forget, Fetch: fetchOverride})
 			if result.WorktreeRemoved {
 				if _, writeError := fmt.Fprintf(stdout, "removed Task Worktree for %s from Task %s at %s\n", result.RepositoryAlias, result.TaskName, result.WorktreePath); writeError != nil {
 					return writeError
@@ -181,7 +181,7 @@ func newTaskRemoveRepositoryCommand(stdout io.Writer) *cobra.Command {
 					return writeError
 				}
 			}
-			if result.BranchDeleted {
+			if result.TaskBranchDeleted {
 				if _, writeError := fmt.Fprintf(stdout, "deleted Task Branch Name %s for %s\n", result.TaskBranchName, result.RepositoryAlias); writeError != nil {
 					return writeError
 				}
@@ -194,7 +194,7 @@ func newTaskRemoveRepositoryCommand(stdout io.Writer) *cobra.Command {
 		},
 	}
 	command.Flags().BoolVar(&force, "force", false, "authorize removal of protected Task Worktree content")
-	command.Flags().BoolVar(&deleteBranch, "delete-branch", false, "delete the Task Branch Name after removing the Task Worktree")
+	command.Flags().BoolVar(&deleteTaskBranch, "delete-branch", false, "delete the Task Branch Name after removing the Task Worktree")
 	command.Flags().BoolVar(&forget, "forget", false, "remove metadata after the Task Worktree path and Git record are already absent")
 	command.Flags().BoolVar(&fetch, "fetch", false, "fetch the configured remote before resolving the current Base Ref")
 	command.Flags().BoolVar(&noFetch, "no-fetch", false, "use current refs without fetching")

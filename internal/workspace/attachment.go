@@ -51,7 +51,18 @@ type RemovalProjection struct {
 	agentsInfo    os.FileInfo
 }
 
-func PrepareRemovalProjection(workspacePath, taskName, taskBranchName string, removed Attachment, remaining []Attachment, allowMissingLink bool) (*RemovalProjection, error) {
+type RemovalLinkProjection struct {
+	workspacePath string
+	linkPath      string
+	linkTarget    string
+	linkInfo      os.FileInfo
+}
+
+func PrepareRemovalLinkProjection(workspacePath string, removed Attachment) (*RemovalLinkProjection, error) {
+	return prepareRemovalLinkProjection(workspacePath, removed, false)
+}
+
+func prepareRemovalLinkProjection(workspacePath string, removed Attachment, allowMissing bool) (*RemovalLinkProjection, error) {
 	workspaceInfo, err := os.Lstat(workspacePath)
 	if err != nil {
 		return nil, fmt.Errorf("inspect Task Workspace %q: %w", workspacePath, err)
@@ -76,7 +87,7 @@ func PrepareRemovalProjection(workspacePath, taskName, taskBranchName string, re
 		return nil, fmt.Errorf("calculate Task Workspace link for %q: %w", removed.Alias, err)
 	}
 	linkInfo, err := os.Lstat(linkPath)
-	if errors.Is(err, os.ErrNotExist) && allowMissingLink {
+	if errors.Is(err, os.ErrNotExist) && allowMissing {
 		linkInfo = nil
 	} else if err != nil {
 		return nil, fmt.Errorf("inspect Task Workspace link %q: %w", linkPath, err)
@@ -86,6 +97,32 @@ func PrepareRemovalProjection(workspacePath, taskName, taskBranchName string, re
 		return nil, fmt.Errorf("inspect Task Workspace link %q: %w", linkPath, readError)
 	} else if target != linkTarget {
 		return nil, fmt.Errorf("%w at %q: Repository Alias link target changed", ErrCollision, linkPath)
+	}
+	return &RemovalLinkProjection{workspacePath: workspacePath, linkPath: linkPath, linkTarget: linkTarget, linkInfo: linkInfo}, nil
+}
+
+func (projection *RemovalLinkProjection) Commit() error {
+	if projection.linkInfo == nil {
+		return nil
+	}
+	current, err := os.Lstat(projection.linkPath)
+	if err != nil {
+		return fmt.Errorf("recheck Task Workspace link %q: %w", projection.linkPath, err)
+	}
+	target, err := os.Readlink(projection.linkPath)
+	if err != nil || !os.SameFile(projection.linkInfo, current) || target != projection.linkTarget {
+		return fmt.Errorf("%w at %q: Repository Alias link changed during removal", ErrCollision, projection.linkPath)
+	}
+	if err := os.Remove(projection.linkPath); err != nil {
+		return fmt.Errorf("remove Task Workspace link %q: %w", projection.linkPath, err)
+	}
+	return fileutil.SyncDirectory(projection.workspacePath)
+}
+
+func PrepareRemovalProjection(workspacePath, taskName, taskBranchName string, removed Attachment, remaining []Attachment, allowMissingLink bool) (*RemovalProjection, error) {
+	link, err := prepareRemovalLinkProjection(workspacePath, removed, allowMissingLink)
+	if err != nil {
+		return nil, err
 	}
 	agentsPath := filepath.Join(workspacePath, "AGENTS.md")
 	agentsInfo, err := os.Lstat(agentsPath)
@@ -103,7 +140,7 @@ func PrepareRemovalProjection(workspacePath, taskName, taskBranchName string, re
 	if err != nil {
 		return nil, fmt.Errorf("%w at %q: %v", ErrCollision, agentsPath, err)
 	}
-	return &RemovalProjection{workspacePath: workspacePath, agentsPath: agentsPath, linkPath: linkPath, linkTarget: linkTarget, linkInfo: linkInfo, original: original, updated: updated, agentsInfo: agentsInfo}, nil
+	return &RemovalProjection{workspacePath: workspacePath, agentsPath: agentsPath, linkPath: link.linkPath, linkTarget: link.linkTarget, linkInfo: link.linkInfo, original: original, updated: updated, agentsInfo: agentsInfo}, nil
 }
 
 func (projection *RemovalProjection) Commit() error {

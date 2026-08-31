@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -218,6 +220,9 @@ func TestRemoveTaskRechecksEachAttachmentImmediatelyBeforeDeletion(t *testing.T)
 	if metadata.State != "incomplete" || len(metadata.Attachments) != 1 || metadata.Attachments[0].Alias != "ledger" {
 		t.Fatalf("identity-race metadata=%#v", metadata)
 	}
+	if !strings.Contains(strings.Join(metadata.Incomplete.ResidualObjects, "\n"), "generated AGENTS entry remains") {
+		t.Fatalf("forced partial removal did not record preserved AGENTS content: %#v", metadata.Incomplete)
+	}
 }
 
 func TestRemoveTaskForceAuthorizesContentButNotWorkspaceLinkIdentity(t *testing.T) {
@@ -245,6 +250,9 @@ func TestRemoveTaskForceAuthorizesContentButNotWorkspaceLinkIdentity(t *testing.
 			t.Fatal(err)
 		}
 		if err := os.WriteFile(filepath.Join(workspace, "SPEC.md"), []byte("user file\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(workspace, "AGENTS.md"), []byte("arbitrary user-authored context without generated markers\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 
@@ -321,6 +329,42 @@ func TestRemoveTaskHonorsTaskLockEvenWithForce(t *testing.T) {
 	}
 	if _, err := os.Lstat(worktree); err != nil {
 		t.Fatalf("busy Task lock changed Task Worktree: %v", err)
+	}
+}
+
+func TestRemoveTaskPreflightsGeneratedAgentsProjectionBeforeDeletingAnything(t *testing.T) {
+	environment, repositories := createTaskWithAttachments(t, "invoice", "ledger")
+	workspace := filepath.Join(environment.dataHome, "devtask", "workspaces", "billing")
+	agentsContents := []byte("user content with one malformed marker\n<!-- devtask:generated:start -->\n")
+	if err := os.WriteFile(filepath.Join(workspace, "AGENTS.md"), agentsContents, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(agentsContents)
+	metadata := readPersistedTask(t, environment, "billing")
+	metadata.ContextFiles[1].SHA256 = hex.EncodeToString(digest[:])
+	writePersistedTask(t, environment, metadata)
+	metadataPath := filepath.Join(environment.dataHome, "devtask", "tasks", "billing.yaml")
+	before, err := os.ReadFile(metadataPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result := environment.run(t, "remove", "billing")
+
+	if result.code != 2 || !strings.Contains(result.stderr, "generated marker pair") {
+		t.Fatalf("projection preflight: code=%d stderr=%q", result.code, result.stderr)
+	}
+	for alias, repository := range repositories {
+		if _, err := os.Lstat(filepath.Join(repository, ".worktrees", "billing")); err != nil {
+			t.Fatalf("projection blocker changed %s Task Worktree: %v", alias, err)
+		}
+	}
+	after, err := os.ReadFile(metadataPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) {
+		t.Fatalf("projection blocker changed Task metadata:\nbefore=%s\nafter=%s", before, after)
 	}
 }
 
