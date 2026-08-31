@@ -108,7 +108,7 @@ func TestNewGroupRejectsInvalidSelectionsBeforeTaskCreation(t *testing.T) {
 				configuration.Groups["delivery"] = []string{"service"}
 			},
 			arguments: []string{"--group", "delivery", "--add", "missing"},
-			wantError: "unknown repository alias",
+			wantError: "unknown Repository Alias",
 		},
 		{
 			name: "group references unknown alias",

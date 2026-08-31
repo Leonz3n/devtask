@@ -338,17 +338,7 @@ func newTaskAddCommand(stdout, stderr io.Writer) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			var baseOverride *string
-			if cmd.Flags().Changed("base") {
-				baseOverride = &base
-			}
-			var fetchOverride *bool
-			if cmd.Flags().Changed("fetch") {
-				fetchOverride = &fetch
-			} else if cmd.Flags().Changed("no-fetch") {
-				override := !noFetch
-				fetchOverride = &override
-			}
+			baseOverride, fetchOverride := attachmentOverrides(cmd, base, fetch, noFetch)
 			results, err := task.AddRepositories(paths, configuration, args[0], args[1:], baseOverride, fetchOverride)
 			if err != nil {
 				return err
@@ -411,17 +401,7 @@ func newTaskCommand(stdout, stderr io.Writer) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			var baseOverride *string
-			if cmd.Flags().Changed("base") {
-				baseOverride = &base
-			}
-			var fetchOverride *bool
-			if cmd.Flags().Changed("fetch") {
-				fetchOverride = &fetch
-			} else if cmd.Flags().Changed("no-fetch") {
-				override := !noFetch
-				fetchOverride = &override
-			}
+			baseOverride, fetchOverride := attachmentOverrides(cmd, base, fetch, noFetch)
 			result, err := task.CreateWithRepositories(paths, configuration, args[0], branchOverride, repositoryAliases, baseOverride, fetchOverride)
 			if err != nil {
 				return err
@@ -441,6 +421,21 @@ func newTaskCommand(stdout, stderr io.Writer) *cobra.Command {
 	command.Flags().BoolVar(&noFetch, "no-fetch", false, "use current refs without fetching")
 	command.MarkFlagsMutuallyExclusive("fetch", "no-fetch")
 	return command
+}
+
+func attachmentOverrides(command *cobra.Command, base string, fetch, noFetch bool) (*string, *bool) {
+	var baseOverride *string
+	if command.Flags().Changed("base") {
+		baseOverride = &base
+	}
+	var fetchOverride *bool
+	if command.Flags().Changed("fetch") {
+		fetchOverride = &fetch
+	} else if command.Flags().Changed("no-fetch") {
+		override := !noFetch
+		fetchOverride = &override
+	}
+	return baseOverride, fetchOverride
 }
 
 func writeAddResults(stdout, stderr io.Writer, results []task.AddResult) error {

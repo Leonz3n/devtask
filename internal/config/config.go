@@ -93,7 +93,7 @@ func (configuration Config) ExpandRepositoryGroup(name string, exclusions, addit
 	}
 	for _, requested := range additions {
 		if _, exists := canonicalAliases[strings.ToLower(requested)]; !exists {
-			return nil, invalid("unknown repository alias %q", requested)
+			return nil, invalid("unknown Repository Alias %q", requested)
 		}
 	}
 
