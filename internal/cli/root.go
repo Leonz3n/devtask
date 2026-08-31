@@ -89,13 +89,7 @@ func newRepoAddCommand(stdout io.Writer) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			action := "registered"
-			if result.Updated {
-				action = "updated"
-			} else if result.Unchanged {
-				action = "already registered"
-			}
-			_, err = fmt.Fprintf(stdout, "%s %s: %s\n", action, result.Repository.Alias, result.Repository.Path)
+			_, err = fmt.Fprintf(stdout, "%s %s: %s\n", result.Action, result.Repository.Alias, result.Repository.Path)
 			return err
 		},
 	}

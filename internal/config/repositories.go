@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -19,10 +20,17 @@ type RegisteredRepository struct {
 	Path  string `json:"path"`
 }
 
+type RegistrationAction string
+
+const (
+	RegistrationCreated   RegistrationAction = "registered"
+	RegistrationUpdated   RegistrationAction = "updated"
+	RegistrationUnchanged RegistrationAction = "already registered"
+)
+
 type RegistrationResult struct {
 	Repository RegisteredRepository
-	Updated    bool
-	Unchanged  bool
+	Action     RegistrationAction
 }
 
 func RegisterRepository(paths Paths, alias, repositoryPath string, update bool) (RegistrationResult, error) {
@@ -52,7 +60,7 @@ func RegisterRepository(paths Paths, alias, repositoryPath string, update bool) 
 		}
 		registered := RegisteredRepository{Alias: existingAlias, Path: repository.Path}
 		if repository.Path == repositoryPath {
-			return RegistrationResult{Repository: registered, Unchanged: true}, nil
+			return RegistrationResult{Repository: registered, Action: RegistrationUnchanged}, nil
 		}
 		if !update {
 			return RegistrationResult{}, invalid("repository alias %q is already registered at %q; use --update to change it", existingAlias, repository.Path)
@@ -64,7 +72,7 @@ func RegisterRepository(paths Paths, alias, repositoryPath string, update bool) 
 		if err := writeIfUnchanged(paths.ConfigFile, original, contents); err != nil {
 			return RegistrationResult{}, err
 		}
-		return RegistrationResult{Repository: RegisteredRepository{Alias: existingAlias, Path: repositoryPath}, Updated: true}, nil
+		return RegistrationResult{Repository: RegisteredRepository{Alias: existingAlias, Path: repositoryPath}, Action: RegistrationUpdated}, nil
 	}
 
 	contents, err := addRepository(original, alias, repositoryPath)
@@ -74,7 +82,7 @@ func RegisterRepository(paths Paths, alias, repositoryPath string, update bool) 
 	if err := writeIfUnchanged(paths.ConfigFile, original, contents); err != nil {
 		return RegistrationResult{}, err
 	}
-	return RegistrationResult{Repository: RegisteredRepository{Alias: alias, Path: repositoryPath}}, nil
+	return RegistrationResult{Repository: RegisteredRepository{Alias: alias, Path: repositoryPath}, Action: RegistrationCreated}, nil
 }
 
 func ListRepositories(path string) ([]RegisteredRepository, error) {
@@ -84,7 +92,15 @@ func ListRepositories(path string) ([]RegisteredRepository, error) {
 	}
 	repositories := make([]RegisteredRepository, 0, len(configuration.Repositories))
 	for alias, repository := range configuration.Repositories {
-		repositories = append(repositories, RegisteredRepository{Alias: alias, Path: repository.Path})
+		canonicalPath, err := filepath.EvalSymlinks(repository.Path)
+		if err != nil {
+			return nil, fmt.Errorf("resolve Main Checkout for repository %q at %q: %w", alias, repository.Path, err)
+		}
+		absolutePath, err := filepath.Abs(canonicalPath)
+		if err != nil {
+			return nil, fmt.Errorf("resolve Main Checkout for repository %q at %q: %w", alias, repository.Path, err)
+		}
+		repositories = append(repositories, RegisteredRepository{Alias: alias, Path: filepath.Clean(absolutePath)})
 	}
 	sort.Slice(repositories, func(i, j int) bool {
 		return strings.ToLower(repositories[i].Alias) < strings.ToLower(repositories[j].Alias)

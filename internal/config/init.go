@@ -81,19 +81,29 @@ func writeAtomicChecked(path string, contents []byte, mode os.FileMode, original
 	if err := temporary.Close(); err != nil {
 		return err
 	}
-	if original != nil {
-		current, err := os.ReadFile(path)
-		if err != nil {
-			return fmt.Errorf("re-read before replacing: %w", err)
+	if original == nil {
+		if err := os.Rename(temporaryPath, path); err != nil {
+			return err
 		}
-		if !bytes.Equal(current, original) {
+		keep = true
+	} else {
+		if err := exchangeFiles(temporaryPath, path); err != nil {
+			return fmt.Errorf("atomically exchange configuration: %w", err)
+		}
+		displaced, err := os.ReadFile(temporaryPath)
+		if err != nil {
+			if rollbackError := exchangeFiles(temporaryPath, path); rollbackError != nil {
+				return fmt.Errorf("inspect displaced configuration: %v; restore it: %w", err, rollbackError)
+			}
+			return fmt.Errorf("inspect displaced configuration: %w", err)
+		}
+		if !bytes.Equal(displaced, original) {
+			if err := exchangeFiles(temporaryPath, path); err != nil {
+				return fmt.Errorf("%w; restore external edit: %v", ErrConcurrentEdit, err)
+			}
 			return ErrConcurrentEdit
 		}
 	}
-	if err := os.Rename(temporaryPath, path); err != nil {
-		return err
-	}
-	keep = true
 	dir, err := os.Open(directory)
 	if err != nil {
 		return err

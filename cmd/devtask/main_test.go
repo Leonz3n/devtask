@@ -407,6 +407,26 @@ func TestRepoAddFromNestedDirectoryAndList(t *testing.T) {
 	}
 }
 
+func TestRepoAddFromMainCheckoutRootWithUnusualPath(t *testing.T) {
+	environment := initializedCLIEnvironment(t)
+	mainCheckout := filepath.Join(t.TempDir(), "service\nwith-unicode-\u00e9")
+	gitRun(t, "init", mainCheckout)
+
+	result := environment.run(t, "repo", "add", "service", mainCheckout)
+
+	if result.code != 0 {
+		t.Fatalf("repo add failed: %s", result.stderr)
+	}
+	canonicalMainCheckout, err := filepath.EvalSymlinks(mainCheckout)
+	if err != nil {
+		t.Fatal(err)
+	}
+	listed := listRepositories(t, environment)
+	if len(listed) != 1 || listed[0] != (listedRepository{Alias: "service", Path: canonicalMainCheckout}) {
+		t.Fatalf("repo list = %#v, want Main Checkout %q", listed, canonicalMainCheckout)
+	}
+}
+
 func TestRepoAddFromLinkedWorktreeRegistersMainCheckout(t *testing.T) {
 	environment := initializedCLIEnvironment(t)
 	mainCheckout := filepath.Join(t.TempDir(), "main-checkout")
