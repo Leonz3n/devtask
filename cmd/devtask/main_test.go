@@ -37,7 +37,18 @@ type persistedTask struct {
 		Path   string `yaml:"path"`
 		SHA256 string `yaml:"sha256"`
 	} `yaml:"context_files"`
-	Attachments []any `yaml:"attachments"`
+	Attachments []struct {
+		Alias          string `yaml:"alias"`
+		MainCheckout   string `yaml:"main_checkout"`
+		WorktreePath   string `yaml:"worktree_path"`
+		TaskBranchName string `yaml:"task_branch_name"`
+		BaseBranch     string `yaml:"base_branch"`
+		BaseRef        string `yaml:"base_ref"`
+		BaseCommit     string `yaml:"base_commit"`
+		Order          int    `yaml:"order"`
+		BranchExisted  bool   `yaml:"branch_existed"`
+		ManagedLinks   []any  `yaml:"managed_links"`
+	} `yaml:"attachments"`
 }
 
 func devtaskBinary(t *testing.T) string {
@@ -812,6 +823,303 @@ func TestNewCreatesAndListsEmptyTask(t *testing.T) {
 	}
 	if len(tasks) != 1 || tasks[0].Name != "billing-rollout" || tasks[0].RepositoryCount != 0 || !tasks[0].CreatedAt.Equal(metadata.CreatedAt) {
 		t.Fatalf("Task list = %#v, want billing-rollout with zero repositories", tasks)
+	}
+}
+
+func TestAddCreatesFirstRepositoryAttachmentFromLocalBase(t *testing.T) {
+	environment := initializedCLIEnvironment(t)
+	repository := filepath.Join(t.TempDir(), "invoice-service")
+	gitRun(t, "init", "-b", "main", repository)
+	if err := os.WriteFile(filepath.Join(repository, "README.md"), []byte("main checkout\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitRun(t, "-C", repository, "add", "README.md")
+	gitRun(t, "-C", repository, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "initial")
+	baseCommit := gitRun(t, "-C", repository, "rev-parse", "main^{commit}")
+	originalBranch := gitRun(t, "-C", repository, "branch", "--show-current")
+	originalStatus := gitRun(t, "-C", repository, "status", "--porcelain")
+	infoExclude := filepath.Join(repository, ".git", "info", "exclude")
+	if err := os.WriteFile(infoExclude, []byte("# keep existing exclude\n*.local\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	registered := environment.run(t, "repo", "add", "invoice", repository)
+	if registered.code != 0 {
+		t.Fatalf("repo add failed: %s", registered.stderr)
+	}
+	created := environment.run(t, "new", "billing")
+	if created.code != 0 {
+		t.Fatalf("new failed: %s", created.stderr)
+	}
+	workspace := filepath.Join(environment.dataHome, "devtask", "workspaces", "billing")
+	agentsPath := filepath.Join(workspace, "AGENTS.md")
+	agents, err := os.ReadFile(agentsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manualPrefix := "# Team notes\n\nPreserve this text.\n\n"
+	if err := os.WriteFile(agentsPath, append([]byte(manualPrefix), agents...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	added := environment.run(t, "add", "billing", "invoice", "--base", "main")
+
+	if added.code != 0 {
+		t.Fatalf("add failed: code=%d stderr=%s", added.code, added.stderr)
+	}
+	if added.stderr != "" || !strings.Contains(added.stdout, "attached invoice to Task billing") {
+		t.Fatalf("add output: stdout=%q stderr=%q", added.stdout, added.stderr)
+	}
+	worktree := filepath.Join(repository, ".worktrees", "billing")
+	canonicalRepository, err := filepath.EvalSymlinks(repository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonicalWorktree, err := filepath.EvalSymlinks(worktree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if branch := gitRun(t, "-C", worktree, "branch", "--show-current"); branch != "feat/billing" {
+		t.Fatalf("Task Worktree branch = %q, want feat/billing", branch)
+	}
+	command := exec.Command("git", "-C", worktree, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}")
+	if output, err := command.CombinedOutput(); err == nil {
+		t.Fatalf("Task Branch unexpectedly has upstream %q", strings.TrimSpace(string(output)))
+	}
+	if branch := gitRun(t, "-C", repository, "branch", "--show-current"); branch != originalBranch {
+		t.Fatalf("Main Checkout branch = %q, want unchanged %q", branch, originalBranch)
+	}
+	if status := gitRun(t, "-C", repository, "status", "--porcelain"); status != originalStatus {
+		t.Fatalf("Main Checkout status = %q, want unchanged %q", status, originalStatus)
+	}
+	exclude, err := os.ReadFile(infoExclude)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(exclude) != "# keep existing exclude\n*.local\n/.worktrees/\n" {
+		t.Fatalf("local exclude = %q", exclude)
+	}
+
+	metadata := readPersistedTask(t, environment, "billing")
+	if len(metadata.Attachments) != 1 {
+		t.Fatalf("attachments = %#v, want one", metadata.Attachments)
+	}
+	attachment := metadata.Attachments[0]
+	if attachment.Alias != "invoice" || attachment.MainCheckout != canonicalRepository || attachment.WorktreePath != canonicalWorktree ||
+		attachment.TaskBranchName != "feat/billing" || attachment.BaseBranch != "main" || attachment.BaseRef != "refs/heads/main" ||
+		attachment.BaseCommit != baseCommit || attachment.Order != 0 || attachment.BranchExisted || attachment.ManagedLinks == nil {
+		t.Fatalf("Repository Attachment = %#v", attachment)
+	}
+	linkPath := filepath.Join(workspace, "invoice")
+	linkTarget, err := os.Readlink(linkPath)
+	if err != nil {
+		t.Fatalf("read Task Workspace link: %v", err)
+	}
+	if filepath.IsAbs(linkTarget) {
+		t.Fatalf("Task Workspace link target = %q, want relative", linkTarget)
+	}
+	resolvedLink, err := filepath.EvalSymlinks(linkPath)
+	if err != nil || resolvedLink != canonicalWorktree {
+		t.Fatalf("Task Workspace link resolves to %q, %v; want %q", resolvedLink, err, canonicalWorktree)
+	}
+	updatedAgents, err := os.ReadFile(agentsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(string(updatedAgents), manualPrefix) || !strings.Contains(string(updatedAgents), "- `invoice`: `"+canonicalWorktree+"`") {
+		t.Fatalf("AGENTS.md did not preserve manual text and list attachment:\n%s", updatedAgents)
+	}
+
+	idempotent := environment.run(t, "add", "billing", "invoice", "--base", "other")
+	if idempotent.code != 0 || !strings.Contains(idempotent.stdout, "already attached") {
+		t.Fatalf("idempotent add: code=%d stdout=%q stderr=%q", idempotent.code, idempotent.stdout, idempotent.stderr)
+	}
+	if repeated := readPersistedTask(t, environment, "billing"); len(repeated.Attachments) != 1 || repeated.Attachments[0].BaseCommit != baseCommit {
+		t.Fatalf("idempotent add changed metadata: %#v", repeated.Attachments)
+	}
+	repeatedExclude, err := os.ReadFile(infoExclude)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(repeatedExclude) != string(exclude) {
+		t.Fatalf("idempotent add changed local exclude: %q", repeatedExclude)
+	}
+}
+
+func TestAddRejectsWorkspaceOwnershipCollisionBeforeGitMutation(t *testing.T) {
+	environment := initializedCLIEnvironment(t)
+	repository := filepath.Join(t.TempDir(), "service")
+	gitRun(t, "init", "-b", "main", repository)
+	if err := os.WriteFile(filepath.Join(repository, "tracked.txt"), []byte("tracked\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitRun(t, "-C", repository, "add", "tracked.txt")
+	gitRun(t, "-C", repository, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "initial")
+	if result := environment.run(t, "repo", "add", "service", repository); result.code != 0 {
+		t.Fatalf("repo add failed: %s", result.stderr)
+	}
+	if result := environment.run(t, "new", "billing"); result.code != 0 {
+		t.Fatalf("new failed: %s", result.stderr)
+	}
+	workspaceCollision := filepath.Join(environment.dataHome, "devtask", "workspaces", "billing", "service")
+	if err := os.WriteFile(workspaceCollision, []byte("user owned\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	excludePath := filepath.Join(repository, ".git", "info", "exclude")
+	excludeBefore, err := os.ReadFile(excludePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result := environment.run(t, "add", "billing", "service")
+
+	if result.code != 2 || !strings.Contains(result.stderr, "Task Workspace collision") {
+		t.Fatalf("collision result: code=%d stderr=%q", result.code, result.stderr)
+	}
+	if contents, err := os.ReadFile(workspaceCollision); err != nil || string(contents) != "user owned\n" {
+		t.Fatalf("collision content changed: contents=%q error=%v", contents, err)
+	}
+	if exists := gitRun(t, "-C", repository, "branch", "--list", "feat/billing"); exists != "" {
+		t.Fatalf("collision created Task Branch: %q", exists)
+	}
+	if _, err := os.Stat(filepath.Join(repository, ".worktrees", "billing")); !os.IsNotExist(err) {
+		t.Fatalf("collision created Task Worktree: %v", err)
+	}
+	excludeAfter, err := os.ReadFile(excludePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(excludeAfter, excludeBefore) {
+		t.Fatalf("collision changed local exclude:\nbefore: %s\nafter: %s", excludeBefore, excludeAfter)
+	}
+	if metadata := readPersistedTask(t, environment, "billing"); len(metadata.Attachments) != 0 {
+		t.Fatalf("collision persisted attachments: %#v", metadata.Attachments)
+	}
+
+	if err := os.Remove(workspaceCollision); err != nil {
+		t.Fatal(err)
+	}
+	worktreesRoot := filepath.Join(repository, ".worktrees")
+	if err := os.Mkdir(worktreesRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	worktreeCollision := filepath.Join(worktreesRoot, "billing")
+	if err := os.WriteFile(worktreeCollision, []byte("also user owned\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	result = environment.run(t, "add", "billing", "service")
+
+	if result.code != 2 || !strings.Contains(result.stderr, "Task Worktree collision") {
+		t.Fatalf("worktree collision result: code=%d stderr=%q", result.code, result.stderr)
+	}
+	if contents, err := os.ReadFile(worktreeCollision); err != nil || string(contents) != "also user owned\n" {
+		t.Fatalf("worktree collision content changed: contents=%q error=%v", contents, err)
+	}
+	if exists := gitRun(t, "-C", repository, "branch", "--list", "feat/billing"); exists != "" {
+		t.Fatalf("worktree collision created Task Branch: %q", exists)
+	}
+	excludeAfterWorktreeCollision, err := os.ReadFile(excludePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(excludeAfterWorktreeCollision, excludeBefore) {
+		t.Fatalf("worktree collision changed local exclude:\nbefore: %s\nafter: %s", excludeBefore, excludeAfterWorktreeCollision)
+	}
+}
+
+func TestAddDoesNotRewriteAnEffectiveWorktreeIgnore(t *testing.T) {
+	environment := initializedCLIEnvironment(t)
+	repository := filepath.Join(t.TempDir(), "service")
+	gitRun(t, "init", "-b", "main", repository)
+	if err := os.WriteFile(filepath.Join(repository, "tracked.txt"), []byte("tracked\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitRun(t, "-C", repository, "add", "tracked.txt")
+	gitRun(t, "-C", repository, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "initial")
+	excludePath := filepath.Join(repository, ".git", "info", "exclude")
+	existing := []byte("# repository-local rules\n/.worktrees/\n")
+	if err := os.WriteFile(excludePath, existing, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if result := environment.run(t, "repo", "add", "service", repository); result.code != 0 {
+		t.Fatalf("repo add failed: %s", result.stderr)
+	}
+	if result := environment.run(t, "new", "billing"); result.code != 0 {
+		t.Fatalf("new failed: %s", result.stderr)
+	}
+
+	result := environment.run(t, "add", "billing", "service")
+
+	if result.code != 0 {
+		t.Fatalf("add failed: %s", result.stderr)
+	}
+	contents, err := os.ReadFile(excludePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(contents, existing) {
+		t.Fatalf("effective local exclude was rewritten:\nbefore: %s\nafter: %s", existing, contents)
+	}
+}
+
+func TestAddFailsImmediatelyWhenMutationLockIsBusy(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("devtask v1 supports macOS and Linux")
+	}
+	for _, test := range []struct {
+		name       string
+		lockPath   func(cliTestEnvironment, string) string
+		diagnostic string
+	}{
+		{
+			name: "Task lock",
+			lockPath: func(environment cliTestEnvironment, _ string) string {
+				return filepath.Join(environment.dataHome, "devtask", "tasks", ".billing.lock")
+			},
+			diagnostic: "Task \"billing\" is busy",
+		},
+		{
+			name: "Registered Repository lock",
+			lockPath: func(_ cliTestEnvironment, repository string) string {
+				return filepath.Join(repository, ".git", "devtask.lock")
+			},
+			diagnostic: "Registered Repository \"service\" is busy",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			environment := initializedCLIEnvironment(t)
+			repository := filepath.Join(t.TempDir(), "service")
+			gitRun(t, "init", "-b", "main", repository)
+			if err := os.WriteFile(filepath.Join(repository, "tracked.txt"), []byte("tracked\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			gitRun(t, "-C", repository, "add", "tracked.txt")
+			gitRun(t, "-C", repository, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "initial")
+			if result := environment.run(t, "repo", "add", "service", repository); result.code != 0 {
+				t.Fatalf("repo add failed: %s", result.stderr)
+			}
+			if result := environment.run(t, "new", "billing"); result.code != 0 {
+				t.Fatalf("new failed: %s", result.stderr)
+			}
+			held, err := os.OpenFile(test.lockPath(environment, repository), os.O_CREATE|os.O_RDWR, 0o600)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer held.Close()
+			if err := unix.Flock(int(held.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
+				t.Fatalf("hold mutation lock: %v", err)
+			}
+
+			result := environment.run(t, "add", "billing", "service")
+
+			if result.code != 1 || !strings.Contains(result.stderr, test.diagnostic) {
+				t.Fatalf("busy add result: code=%d stderr=%q", result.code, result.stderr)
+			}
+			if exists := gitRun(t, "-C", repository, "branch", "--list", "feat/billing"); exists != "" {
+				t.Fatalf("busy add created Task Branch: %q", exists)
+			}
+		})
 	}
 }
 

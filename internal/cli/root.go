@@ -55,8 +55,48 @@ func NewRootCommand(stdout, stderr io.Writer) *cobra.Command {
 	})
 	root.AddCommand(newInitCommand(stdout))
 	root.AddCommand(newRepoCommand(stdout))
-	root.AddCommand(newTaskCommand(stdout), newTaskListCommand(stdout))
+	root.AddCommand(newTaskCommand(stdout), newTaskListCommand(stdout), newTaskAddCommand(stdout))
 	return root
+}
+
+func newTaskAddCommand(stdout io.Writer) *cobra.Command {
+	var base string
+	command := &cobra.Command{
+		Use:   "add <task> <alias>",
+		Short: "Attach a Registered Repository to a Task",
+		Args: func(cmd *cobra.Command, args []string) error {
+			if err := cobra.ExactArgs(2)(cmd, args); err != nil {
+				return &validationError{err: err}
+			}
+			return nil
+		},
+		RunE: func(cmd *cobra.Command, args []string) error {
+			paths, err := config.ResolvePaths()
+			if err != nil {
+				return err
+			}
+			configuration, err := config.Load(paths.ConfigFile)
+			if err != nil {
+				return err
+			}
+			var baseOverride *string
+			if cmd.Flags().Changed("base") {
+				baseOverride = &base
+			}
+			result, err := task.AddRepository(paths, configuration, args[0], args[1], baseOverride)
+			if err != nil {
+				return err
+			}
+			action := "attached"
+			if result.AlreadyAttached {
+				action = "already attached"
+			}
+			_, err = fmt.Fprintf(stdout, "%s %s to Task %s at %s\n", action, result.Attachment.Alias, result.TaskName, result.Attachment.WorktreePath)
+			return err
+		},
+	}
+	command.Flags().StringVar(&base, "base", "", "local base branch for the new Task Branch")
+	return command
 }
 
 func newTaskCommand(stdout io.Writer) *cobra.Command {

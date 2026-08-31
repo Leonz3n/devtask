@@ -31,7 +31,18 @@ type State string
 
 const StateReady State = "ready"
 
-type RepositoryAttachment struct{}
+type RepositoryAttachment struct {
+	Alias          string                  `yaml:"alias"`
+	MainCheckout   string                  `yaml:"main_checkout"`
+	WorktreePath   string                  `yaml:"worktree_path"`
+	TaskBranchName string                  `yaml:"task_branch_name"`
+	BaseBranch     string                  `yaml:"base_branch"`
+	BaseRef        string                  `yaml:"base_ref"`
+	BaseCommit     string                  `yaml:"base_commit"`
+	Order          int                     `yaml:"order"`
+	BranchExisted  bool                    `yaml:"branch_existed"`
+	ManagedLinks   []workspace.ManagedLink `yaml:"managed_links"`
+}
 
 type Metadata struct {
 	SchemaVersion  int                     `yaml:"schema_version"`
