@@ -34,10 +34,10 @@ const StateReady State = "ready"
 const StateIncomplete State = "incomplete"
 
 type IncompleteOperation struct {
-	Operation       string   `yaml:"operation"`
-	LastError       string   `yaml:"last_error"`
-	ResidualObjects []string `yaml:"residual_objects"`
-	Recovery        []string `yaml:"recovery"`
+	Operation       string   `yaml:"operation" json:"operation"`
+	LastError       string   `yaml:"last_error" json:"last_error"`
+	ResidualObjects []string `yaml:"residual_objects" json:"residual_objects"`
+	Recovery        []string `yaml:"recovery" json:"recovery"`
 }
 
 type RepositoryAttachment struct {

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/Leonz3n/devtask/internal/config"
@@ -55,8 +56,129 @@ func NewRootCommand(stdout, stderr io.Writer) *cobra.Command {
 	})
 	root.AddCommand(newInitCommand(stdout))
 	root.AddCommand(newRepoCommand(stdout))
-	root.AddCommand(newTaskCommand(stdout), newTaskListCommand(stdout), newTaskAddCommand(stdout))
+	root.AddCommand(newTaskCommand(stdout), newTaskListCommand(stdout), newTaskAddCommand(stdout), newTaskStatusCommand(stdout))
 	return root
+}
+
+func newTaskStatusCommand(stdout io.Writer) *cobra.Command {
+	var asJSON bool
+	command := &cobra.Command{
+		Use:   "status <task>",
+		Short: "Report a Task and its Repository Attachments",
+		Args: func(cmd *cobra.Command, args []string) error {
+			if err := cobra.ExactArgs(1)(cmd, args); err != nil {
+				return &validationError{err: err}
+			}
+			return nil
+		},
+		RunE: func(_ *cobra.Command, args []string) error {
+			paths, err := config.ResolvePaths()
+			if err != nil {
+				return err
+			}
+			report, err := task.Status(paths, args[0])
+			if err != nil {
+				return err
+			}
+			if asJSON {
+				encoder := json.NewEncoder(stdout)
+				encoder.SetEscapeHTML(false)
+				return encoder.Encode(report)
+			}
+			if _, err := fmt.Fprintf(stdout, "Task %s [%s]\n  Task Branch Name: %s\n  Created: %s\n  Task Workspace: %s\n", report.Name, formatTaskState(report), report.TaskBranchName, report.CreatedAt.Format(time.RFC3339), report.WorkspacePath); err != nil {
+				return err
+			}
+			if report.Inspection != nil {
+				if _, err := fmt.Fprintf(stdout, "  %s: %s\n", report.Inspection.Operation, report.Inspection.Message); err != nil {
+					return err
+				}
+				for _, recovery := range report.Inspection.Recovery {
+					if _, err := fmt.Fprintf(stdout, "  Recovery: %s\n", recovery); err != nil {
+						return err
+					}
+				}
+			}
+			if report.IncompleteOperation != nil {
+				if _, err := fmt.Fprintf(stdout, "  Incomplete operation: %s\n  Last error: %s\n", report.IncompleteOperation.Operation, report.IncompleteOperation.LastError); err != nil {
+					return err
+				}
+				for _, residual := range report.IncompleteOperation.ResidualObjects {
+					if _, err := fmt.Fprintf(stdout, "  Residual: %s\n", residual); err != nil {
+						return err
+					}
+				}
+				for _, recovery := range report.IncompleteOperation.Recovery {
+					if _, err := fmt.Fprintf(stdout, "  Recovery: %s\n", recovery); err != nil {
+						return err
+					}
+				}
+			}
+			for _, attachment := range report.Attachments {
+				state := formatAttachmentState(attachment)
+				if _, err := fmt.Fprintf(stdout, "  %s\t%s\t%s\n", attachment.Alias, state, attachment.WorktreePath); err != nil {
+					return err
+				}
+				if attachment.Inspection != nil {
+					if _, err := fmt.Fprintf(stdout, "    %s: %s\n", attachment.Inspection.Operation, attachment.Inspection.Message); err != nil {
+						return err
+					}
+					for _, recovery := range attachment.Inspection.Recovery {
+						if _, err := fmt.Fprintf(stdout, "    Recovery: %s\n", recovery); err != nil {
+							return err
+						}
+					}
+				}
+				if attachment.LastError != "" {
+					if _, err := fmt.Fprintf(stdout, "    Last error: %s\n", attachment.LastError); err != nil {
+						return err
+					}
+				}
+				for _, residual := range attachment.ResidualObjects {
+					if _, err := fmt.Fprintf(stdout, "    Residual: %s\n", residual); err != nil {
+						return err
+					}
+				}
+			}
+			return nil
+		},
+	}
+	command.Flags().BoolVar(&asJSON, "json", false, "output JSON")
+	return command
+}
+
+func formatTaskState(report task.StatusReport) string {
+	states := []string{string(report.State)}
+	if report.Missing {
+		states = append(states, "missing")
+	}
+	if report.Unknown {
+		states = append(states, "unknown")
+	}
+	return strings.Join(states, ", ")
+}
+
+func formatAttachmentState(attachment task.AttachmentStatus) string {
+	states := make([]string, 0, 8)
+	for _, candidate := range []struct {
+		set  bool
+		name string
+	}{
+		{attachment.Modified, "modified"},
+		{attachment.Staged, "staged"},
+		{attachment.Untracked, "untracked"},
+		{attachment.Conflicted, "conflicted"},
+		{attachment.Missing, "missing"},
+		{attachment.Unknown, "unknown"},
+		{attachment.Incomplete, "incomplete"},
+	} {
+		if candidate.set {
+			states = append(states, candidate.name)
+		}
+	}
+	if len(states) == 0 {
+		return "clean"
+	}
+	return strings.Join(states, ", ")
 }
 
 func newTaskAddCommand(stdout io.Writer) *cobra.Command {
