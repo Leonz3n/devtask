@@ -112,7 +112,7 @@ func newTaskAddCommand(stdout io.Writer) *cobra.Command {
 			return err
 		},
 	}
-	command.Flags().StringVar(&base, "base", "", "local base branch for the new Task Branch")
+	command.Flags().StringVar(&base, "base", "", "branch name used to resolve the Base Ref for a new Task Branch")
 	command.Flags().BoolVar(&fetch, "fetch", false, "fetch the configured remote before resolving the Base Ref")
 	command.Flags().BoolVar(&noFetch, "no-fetch", false, "use current refs without fetching")
 	command.MarkFlagsMutuallyExclusive("fetch", "no-fetch")

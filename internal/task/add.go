@@ -83,12 +83,6 @@ func AddRepository(paths config.Paths, configuration config.Config, taskName, re
 	if baseOverride != nil {
 		baseBranch = *baseOverride
 	}
-	if strings.TrimSpace(baseBranch) == "" {
-		return AddResult{}, invalid("Base Ref for repository %q must be a non-empty branch name", alias)
-	}
-	if err := gitcmd.ValidateBranchName(baseBranch); err != nil {
-		return AddResult{}, invalid("invalid Base Ref for repository %q: %v", alias, err)
-	}
 	branchRef := "refs/heads/" + metadata.TaskBranchName
 	branchExisted, err := gitcmd.RefExists(mainCheckout, branchRef)
 	if err != nil {
@@ -104,30 +98,6 @@ func AddRepository(paths config.Paths, configuration config.Config, taskName, re
 		} else if !errors.Is(err, gitcmd.ErrWorktreeRecordNotFound) {
 			return AddResult{}, fmt.Errorf("inspect Task Branch Name ownership in repository %q: %w", alias, err)
 		}
-	}
-	baseRef := ""
-	baseCommit := ""
-	if !branchExisted {
-		remote := configuration.Defaults.Remote
-		if repositoryConfiguration.Remote != "" {
-			remote = repositoryConfiguration.Remote
-		}
-		fetch := configuration.Defaults.Fetch
-		if repositoryConfiguration.Fetch != nil {
-			fetch = *repositoryConfiguration.Fetch
-		}
-		if fetchOverride != nil {
-			fetch = *fetchOverride
-		}
-		resolvedBase, err := gitcmd.ResolveBase(mainCheckout, baseBranch, remote, fetch)
-		if err != nil {
-			if errors.Is(err, gitcmd.ErrBaseRefNotFound) {
-				return AddResult{}, invalid("Base Ref %q for repository %q does not exist: %v", baseBranch, alias, err)
-			}
-			return AddResult{}, fmt.Errorf("resolve Base Ref %q for repository %q: %w", baseBranch, alias, err)
-		}
-		baseRef = resolvedBase.Ref
-		baseCommit = resolvedBase.Commit
 	}
 	worktreesRoot := filepath.Dir(expectedWorktree)
 	rootCreated, err := preflightWorktreeRoot(worktreesRoot)
@@ -160,6 +130,36 @@ func AddRepository(paths config.Paths, configuration config.Config, taskName, re
 			return AddResult{}, invalid("%v", err)
 		}
 		return AddResult{}, err
+	}
+	baseRef := ""
+	baseCommit := ""
+	if !branchExisted {
+		if strings.TrimSpace(baseBranch) == "" {
+			return AddResult{}, invalid("Base Ref for repository %q must be a non-empty branch name", alias)
+		}
+		if err := gitcmd.ValidateBranchName(baseBranch); err != nil {
+			return AddResult{}, invalid("invalid Base Ref for repository %q: %v", alias, err)
+		}
+		remote := configuration.Defaults.Remote
+		if repositoryConfiguration.Remote != "" {
+			remote = repositoryConfiguration.Remote
+		}
+		fetch := configuration.Defaults.Fetch
+		if repositoryConfiguration.Fetch != nil {
+			fetch = *repositoryConfiguration.Fetch
+		}
+		if fetchOverride != nil {
+			fetch = *fetchOverride
+		}
+		resolvedBaseRef, err := gitcmd.ResolveBaseRef(mainCheckout, baseBranch, remote, fetch)
+		if err != nil {
+			if errors.Is(err, gitcmd.ErrBaseRefNotFound) {
+				return AddResult{}, invalid("Base Ref %q for repository %q does not exist: %v", baseBranch, alias, err)
+			}
+			return AddResult{}, fmt.Errorf("resolve Base Ref %q for repository %q: %w", baseBranch, alias, err)
+		}
+		baseRef = resolvedBaseRef.Ref
+		baseCommit = resolvedBaseRef.Commit
 	}
 	attachment := RepositoryAttachment{
 		Alias:          alias,

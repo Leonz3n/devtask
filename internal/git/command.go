@@ -9,7 +9,7 @@ import (
 
 var ErrBaseRefNotFound = errors.New("Base Ref not found")
 
-type ResolvedBase struct {
+type ResolvedBaseRef struct {
 	Ref    string
 	Commit string
 }
@@ -60,31 +60,31 @@ func ValidateBranchName(name string) error {
 	return fmt.Errorf("invalid Task Branch Name %q: %s", name, message)
 }
 
-func ResolveBase(directory, branch, remote string, fetch bool) (ResolvedBase, error) {
+func ResolveBaseRef(directory, branch, remote string, fetch bool) (ResolvedBaseRef, error) {
 	remoteExists, err := RemoteExists(directory, remote)
 	if err != nil {
-		return ResolvedBase{}, fmt.Errorf("inspect configured remote %q: %w", remote, err)
+		return ResolvedBaseRef{}, fmt.Errorf("inspect configured remote %q: %w", remote, err)
 	}
 	if fetch && remoteExists {
 		if _, err := Run(directory, "fetch", "--", remote); err != nil {
-			return ResolvedBase{}, fmt.Errorf("fetch configured remote %q: %w", remote, err)
+			return ResolvedBaseRef{}, fmt.Errorf("fetch configured remote %q: %w", remote, err)
 		}
 	}
 	if remoteExists {
 		remoteRef := "refs/remotes/" + remote + "/" + branch
 		if resolved, found, err := resolveCommit(directory, remoteRef); err != nil {
-			return ResolvedBase{}, err
+			return ResolvedBaseRef{}, err
 		} else if found {
 			return resolved, nil
 		}
 	}
 	localRef := "refs/heads/" + branch
 	if resolved, found, err := resolveCommit(directory, localRef); err != nil {
-		return ResolvedBase{}, err
+		return ResolvedBaseRef{}, err
 	} else if found {
 		return resolved, nil
 	}
-	return ResolvedBase{}, fmt.Errorf("%w: branch %q is absent from configured remote %q and local branches", ErrBaseRefNotFound, branch, remote)
+	return ResolvedBaseRef{}, fmt.Errorf("%w: branch %q is absent from configured remote %q and local branches", ErrBaseRefNotFound, branch, remote)
 }
 
 func RemoteExists(directory, remote string) (bool, error) {
@@ -103,14 +103,14 @@ func RemoteExists(directory, remote string) (bool, error) {
 	return false, nil
 }
 
-func resolveCommit(directory, ref string) (ResolvedBase, bool, error) {
+func resolveCommit(directory, ref string) (ResolvedBaseRef, bool, error) {
 	exists, err := RefExists(directory, ref)
 	if err != nil || !exists {
-		return ResolvedBase{}, false, err
+		return ResolvedBaseRef{}, false, err
 	}
 	output, err := Run(directory, "rev-parse", "--verify", ref+"^{commit}")
 	if err != nil {
-		return ResolvedBase{}, false, fmt.Errorf("resolve Base Ref %q: %w", ref, err)
+		return ResolvedBaseRef{}, false, fmt.Errorf("resolve Base Ref %q: %w", ref, err)
 	}
-	return ResolvedBase{Ref: ref, Commit: strings.TrimSpace(string(output))}, true, nil
+	return ResolvedBaseRef{Ref: ref, Commit: strings.TrimSpace(string(output))}, true, nil
 }

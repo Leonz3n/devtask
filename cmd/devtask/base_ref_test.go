@@ -12,37 +12,10 @@ import (
 
 func TestAddFetchesAndPrefersRemoteTrackingBaseRef(t *testing.T) {
 	environment := initializedCLIEnvironment(t)
-	remote := filepath.Join(t.TempDir(), "service.git")
-	gitRun(t, "init", "--bare", remote)
-	seed := filepath.Join(t.TempDir(), "seed")
-	gitRun(t, "init", "-b", "main", seed)
-	gitRun(t, "-C", seed, "config", "user.name", "Test")
-	gitRun(t, "-C", seed, "config", "user.email", "test@example.com")
-	tracked := filepath.Join(seed, "tracked.txt")
-	if err := os.WriteFile(tracked, []byte("initial\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	gitRun(t, "-C", seed, "add", "tracked.txt")
-	gitRun(t, "-C", seed, "commit", "-m", "initial")
-	gitRun(t, "-C", seed, "remote", "add", "origin", remote)
-	gitRun(t, "-C", seed, "push", "-u", "origin", "main")
+	fixture := createAdvancedRemoteRepository(t)
+	gitRun(t, "-C", fixture.repository, "remote", "rename", "origin", "upstream")
 
-	repository := filepath.Join(t.TempDir(), "service")
-	gitRun(t, "clone", "--branch", "main", remote, repository)
-	gitRun(t, "-C", repository, "remote", "rename", "origin", "upstream")
-	localCommit := gitRun(t, "-C", repository, "rev-parse", "refs/heads/main^{commit}")
-	if err := os.WriteFile(tracked, []byte("fresh remote\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	gitRun(t, "-C", seed, "add", "tracked.txt")
-	gitRun(t, "-C", seed, "commit", "-m", "advance remote")
-	gitRun(t, "-C", seed, "push", "origin", "main")
-	remoteCommit := gitRun(t, "-C", seed, "rev-parse", "HEAD^{commit}")
-	if remoteCommit == localCommit {
-		t.Fatal("test remote did not advance beyond local main")
-	}
-
-	if result := environment.run(t, "repo", "add", "service", repository); result.code != 0 {
+	if result := environment.run(t, "repo", "add", "service", fixture.repository); result.code != 0 {
 		t.Fatalf("repo add failed: %s", result.stderr)
 	}
 	updateConfiguration(t, environment, func(configuration *config.Config) {
@@ -58,51 +31,28 @@ func TestAddFetchesAndPrefersRemoteTrackingBaseRef(t *testing.T) {
 		t.Fatalf("add failed: code=%d stderr=%s", result.code, result.stderr)
 	}
 
-	worktree := filepath.Join(repository, ".worktrees", "billing")
-	if commit := gitRun(t, "-C", worktree, "rev-parse", "HEAD^{commit}"); commit != remoteCommit {
-		t.Fatalf("Task Worktree commit = %s, want freshly fetched remote commit %s", commit, remoteCommit)
+	worktree := filepath.Join(fixture.repository, ".worktrees", "billing")
+	if commit := gitRun(t, "-C", worktree, "rev-parse", "HEAD^{commit}"); commit != fixture.freshCommit {
+		t.Fatalf("Task Worktree commit = %s, want freshly fetched remote commit %s", commit, fixture.freshCommit)
 	}
-	if commit := gitRun(t, "-C", repository, "rev-parse", "refs/heads/main^{commit}"); commit != localCommit {
-		t.Fatalf("local main moved to %s, want unchanged %s", commit, localCommit)
+	if commit := gitRun(t, "-C", fixture.repository, "rev-parse", "refs/heads/main^{commit}"); commit != fixture.staleCommit {
+		t.Fatalf("local main moved to %s, want unchanged %s", commit, fixture.staleCommit)
 	}
 	metadata := readPersistedTask(t, environment, "billing")
 	if len(metadata.Attachments) != 1 {
 		t.Fatalf("attachments = %#v, want one", metadata.Attachments)
 	}
 	attachment := metadata.Attachments[0]
-	if attachment.BaseRef != "refs/remotes/upstream/main" || attachment.BaseCommit != remoteCommit {
-		t.Fatalf("Base Ref snapshot = %q at %q, want refs/remotes/upstream/main at %q", attachment.BaseRef, attachment.BaseCommit, remoteCommit)
+	if attachment.BaseRef != "refs/remotes/upstream/main" || attachment.BaseCommit != fixture.freshCommit {
+		t.Fatalf("Base Ref snapshot = %q at %q, want refs/remotes/upstream/main at %q", attachment.BaseRef, attachment.BaseCommit, fixture.freshCommit)
 	}
 }
 
 func TestAddFetchFlagsOverrideConfiguredBehavior(t *testing.T) {
 	environment := initializedCLIEnvironment(t)
-	remote := filepath.Join(t.TempDir(), "service.git")
-	gitRun(t, "init", "--bare", remote)
-	seed := filepath.Join(t.TempDir(), "seed")
-	gitRun(t, "init", "-b", "main", seed)
-	gitRun(t, "-C", seed, "config", "user.name", "Test")
-	gitRun(t, "-C", seed, "config", "user.email", "test@example.com")
-	tracked := filepath.Join(seed, "tracked.txt")
-	if err := os.WriteFile(tracked, []byte("initial\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	gitRun(t, "-C", seed, "add", "tracked.txt")
-	gitRun(t, "-C", seed, "commit", "-m", "initial")
-	gitRun(t, "-C", seed, "remote", "add", "origin", remote)
-	gitRun(t, "-C", seed, "push", "-u", "origin", "main")
-	repository := filepath.Join(t.TempDir(), "service")
-	gitRun(t, "clone", "--branch", "main", remote, repository)
-	staleCommit := gitRun(t, "-C", repository, "rev-parse", "refs/remotes/origin/main^{commit}")
-	if err := os.WriteFile(tracked, []byte("fresh remote\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	gitRun(t, "-C", seed, "add", "tracked.txt")
-	gitRun(t, "-C", seed, "commit", "-m", "advance remote")
-	gitRun(t, "-C", seed, "push", "origin", "main")
-	freshCommit := gitRun(t, "-C", seed, "rev-parse", "HEAD^{commit}")
+	fixture := createAdvancedRemoteRepository(t)
 
-	if result := environment.run(t, "repo", "add", "service", repository); result.code != 0 {
+	if result := environment.run(t, "repo", "add", "service", fixture.repository); result.code != 0 {
 		t.Fatalf("repo add failed: %s", result.stderr)
 	}
 	if result := environment.run(t, "new", "offline"); result.code != 0 {
@@ -112,21 +62,25 @@ func TestAddFetchFlagsOverrideConfiguredBehavior(t *testing.T) {
 	if offline.code != 0 {
 		t.Fatalf("add --no-fetch failed: code=%d stderr=%s", offline.code, offline.stderr)
 	}
-	if commit := gitRun(t, "-C", filepath.Join(repository, ".worktrees", "offline"), "rev-parse", "HEAD^{commit}"); commit != staleCommit {
-		t.Fatalf("--no-fetch Task Worktree commit = %s, want current remote-tracking commit %s", commit, staleCommit)
+	if commit := gitRun(t, "-C", filepath.Join(fixture.repository, ".worktrees", "offline"), "rev-parse", "HEAD^{commit}"); commit != fixture.staleCommit {
+		t.Fatalf("--no-fetch Task Worktree commit = %s, want current remote-tracking commit %s", commit, fixture.staleCommit)
 	}
 
-	configPath := filepath.Join(environment.configHome, "devtask", "config.yaml")
-	configuration, err := os.ReadFile(configPath)
-	if err != nil {
-		t.Fatal(err)
+	disabled := false
+	updateConfiguration(t, environment, func(configuration *config.Config) {
+		repositoryConfiguration := configuration.Repositories["service"]
+		repositoryConfiguration.Fetch = &disabled
+		configuration.Repositories["service"] = repositoryConfiguration
+	})
+	if result := environment.run(t, "new", "configured-offline"); result.code != 0 {
+		t.Fatalf("new configured-offline failed: %s", result.stderr)
 	}
-	disabled := strings.Replace(string(configuration), "  fetch: true\n", "  fetch: false\n", 1)
-	if disabled == string(configuration) {
-		t.Fatal("generated configuration did not contain defaults.fetch")
+	configuredOffline := environment.run(t, "add", "configured-offline", "service")
+	if configuredOffline.code != 0 {
+		t.Fatalf("add with repository fetch disabled failed: code=%d stderr=%s", configuredOffline.code, configuredOffline.stderr)
 	}
-	if err := os.WriteFile(configPath, []byte(disabled), 0o600); err != nil {
-		t.Fatal(err)
+	if commit := gitRun(t, "-C", filepath.Join(fixture.repository, ".worktrees", "configured-offline"), "rev-parse", "HEAD^{commit}"); commit != fixture.staleCommit {
+		t.Fatalf("repository fetch=false commit = %s, want stale commit %s", commit, fixture.staleCommit)
 	}
 	if result := environment.run(t, "new", "online"); result.code != 0 {
 		t.Fatalf("new online failed: %s", result.stderr)
@@ -135,8 +89,8 @@ func TestAddFetchFlagsOverrideConfiguredBehavior(t *testing.T) {
 	if online.code != 0 {
 		t.Fatalf("add --fetch failed: code=%d stderr=%s", online.code, online.stderr)
 	}
-	if commit := gitRun(t, "-C", filepath.Join(repository, ".worktrees", "online"), "rev-parse", "HEAD^{commit}"); commit != freshCommit {
-		t.Fatalf("--fetch Task Worktree commit = %s, want fetched commit %s", commit, freshCommit)
+	if commit := gitRun(t, "-C", filepath.Join(fixture.repository, ".worktrees", "online"), "rev-parse", "HEAD^{commit}"); commit != fixture.freshCommit {
+		t.Fatalf("--fetch Task Worktree commit = %s, want fetched commit %s", commit, fixture.freshCommit)
 	}
 }
 
@@ -171,7 +125,7 @@ func TestAddAttachesExistingUnassignedTaskBranchWithoutApplyingBase(t *testing.T
 		t.Fatalf("new failed: %s", result.stderr)
 	}
 
-	result := environment.run(t, "add", "billing", "service", "--base", "does-not-exist")
+	result := environment.run(t, "add", "billing", "service", "--base", "bad branch")
 
 	if result.code != 0 {
 		t.Fatalf("add existing Task Branch failed: code=%d stderr=%s", result.code, result.stderr)
@@ -192,6 +146,56 @@ func TestAddAttachesExistingUnassignedTaskBranchWithoutApplyingBase(t *testing.T
 	}
 	if metadata.Attachments[0].BaseRef != "" || metadata.Attachments[0].BaseCommit != "" {
 		t.Fatalf("existing branch recorded unapplied Base Ref: %#v", metadata.Attachments[0])
+	}
+}
+
+func TestAddRejectsMissingRemoteAndLocalBaseWithoutMutation(t *testing.T) {
+	environment := initializedCLIEnvironment(t)
+	repository := createCommittedRepository(t, "service")
+	if result := environment.run(t, "repo", "add", "service", repository); result.code != 0 {
+		t.Fatalf("repo add failed: %s", result.stderr)
+	}
+	updateConfiguration(t, environment, func(configuration *config.Config) {
+		configuration.Defaults.Remote = ""
+	})
+	if result := environment.run(t, "new", "billing"); result.code != 0 {
+		t.Fatalf("new failed: %s", result.stderr)
+	}
+
+	result := environment.run(t, "add", "billing", "service", "--base", "missing")
+
+	if result.code != 2 || !strings.Contains(result.stderr, "Base Ref \"missing\"") || !strings.Contains(result.stderr, "does not exist") {
+		t.Fatalf("missing Base Ref result: code=%d stderr=%q", result.code, result.stderr)
+	}
+	if branch := gitRun(t, "-C", repository, "branch", "--list", "feat/billing"); branch != "" {
+		t.Fatalf("missing Base Ref created Task Branch %q", branch)
+	}
+	if metadata := readPersistedTask(t, environment, "billing"); len(metadata.Attachments) != 0 {
+		t.Fatalf("missing Base Ref persisted attachments: %#v", metadata.Attachments)
+	}
+}
+
+func TestAddCompletesCollisionPreflightBeforeFetch(t *testing.T) {
+	environment := initializedCLIEnvironment(t)
+	fixture := createAdvancedRemoteRepository(t)
+	if result := environment.run(t, "repo", "add", "service", fixture.repository); result.code != 0 {
+		t.Fatalf("repo add failed: %s", result.stderr)
+	}
+	if result := environment.run(t, "new", "billing"); result.code != 0 {
+		t.Fatalf("new failed: %s", result.stderr)
+	}
+	collision := filepath.Join(environment.dataHome, "devtask", "workspaces", "billing", "service")
+	if err := os.WriteFile(collision, []byte("user owned\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	result := environment.run(t, "add", "billing", "service")
+
+	if result.code != 2 || !strings.Contains(result.stderr, "Task Workspace collision") {
+		t.Fatalf("collision result: code=%d stderr=%q", result.code, result.stderr)
+	}
+	if commit := gitRun(t, "-C", fixture.repository, "rev-parse", "refs/remotes/origin/main^{commit}"); commit != fixture.staleCommit {
+		t.Fatalf("collision fetched remote-tracking Base Ref to %s, want unchanged %s", commit, fixture.staleCommit)
 	}
 }
 
@@ -422,20 +426,34 @@ func createCommittedRepository(t *testing.T, name string) string {
 	return repository
 }
 
-func rewriteConfig(t *testing.T, environment cliTestEnvironment, update func(string) string) {
+type advancedRemoteRepository struct {
+	repository  string
+	staleCommit string
+	freshCommit string
+}
+
+func createAdvancedRemoteRepository(t *testing.T) advancedRemoteRepository {
 	t.Helper()
-	path := filepath.Join(environment.configHome, "devtask", "config.yaml")
-	contents, err := os.ReadFile(path)
-	if err != nil {
+	remote := filepath.Join(t.TempDir(), "service.git")
+	gitRun(t, "init", "--bare", remote)
+	seed := createCommittedRepository(t, "seed")
+	tracked := filepath.Join(seed, "tracked.txt")
+	gitRun(t, "-C", seed, "remote", "add", "origin", remote)
+	gitRun(t, "-C", seed, "push", "-u", "origin", "main")
+	repository := filepath.Join(t.TempDir(), "service")
+	gitRun(t, "clone", "--branch", "main", remote, repository)
+	staleCommit := gitRun(t, "-C", repository, "rev-parse", "refs/remotes/origin/main^{commit}")
+	if err := os.WriteFile(tracked, []byte("fresh remote\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	updated := update(string(contents))
-	if updated == string(contents) {
-		t.Fatal("configuration rewrite made no change")
+	gitRun(t, "-C", seed, "add", "tracked.txt")
+	gitRun(t, "-C", seed, "commit", "-m", "advance remote")
+	gitRun(t, "-C", seed, "push", "origin", "main")
+	freshCommit := gitRun(t, "-C", seed, "rev-parse", "HEAD^{commit}")
+	if freshCommit == staleCommit {
+		t.Fatal("test remote did not advance")
 	}
-	if err := os.WriteFile(path, []byte(updated), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	return advancedRemoteRepository{repository: repository, staleCommit: staleCommit, freshCommit: freshCommit}
 }
 
 func updateConfiguration(t *testing.T, environment cliTestEnvironment, update func(*config.Config)) {
