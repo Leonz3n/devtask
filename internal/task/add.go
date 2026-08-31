@@ -22,7 +22,7 @@ type AddResult struct {
 	AlreadyAttached bool
 }
 
-func AddRepository(paths config.Paths, configuration config.Config, taskName, repositoryAlias string, baseOverride *string) (AddResult, error) {
+func AddRepository(paths config.Paths, configuration config.Config, taskName, repositoryAlias string, baseOverride *string, fetchOverride *bool) (AddResult, error) {
 	if err := ValidateName(taskName); err != nil {
 		return AddResult{}, err
 	}
@@ -89,17 +89,45 @@ func AddRepository(paths config.Paths, configuration config.Config, taskName, re
 	if err := gitcmd.ValidateBranchName(baseBranch); err != nil {
 		return AddResult{}, invalid("invalid Base Ref for repository %q: %v", alias, err)
 	}
-	baseRef := "refs/heads/" + baseBranch
-	baseCommitOutput, err := gitcmd.Run(mainCheckout, "rev-parse", "--verify", baseRef+"^{commit}")
-	if err != nil {
-		return AddResult{}, invalid("local Base Ref %q for repository %q does not exist: %v", baseBranch, alias, err)
-	}
-	baseCommit := strings.TrimSpace(string(baseCommitOutput))
 	branchRef := "refs/heads/" + metadata.TaskBranchName
-	if exists, err := gitcmd.RefExists(mainCheckout, branchRef); err != nil {
+	branchExisted, err := gitcmd.RefExists(mainCheckout, branchRef)
+	if err != nil {
 		return AddResult{}, fmt.Errorf("inspect Task Branch Name %q in repository %q: %w", metadata.TaskBranchName, alias, err)
-	} else if exists {
-		return AddResult{}, invalid("Task Branch Name %q already exists in repository %q; existing branch attachment is not supported yet", metadata.TaskBranchName, alias)
+	}
+	if branchExisted {
+		if owner, err := gitcmd.WorktreeForBranch(mainCheckout, branchRef); err == nil {
+			detail := owner.Path
+			if owner.Prunable {
+				detail += " (prunable)"
+			}
+			return AddResult{}, invalid("Task Branch Name %q is already assigned to Git worktree %q; refusing to prune or steal it", metadata.TaskBranchName, detail)
+		} else if !errors.Is(err, gitcmd.ErrWorktreeRecordNotFound) {
+			return AddResult{}, fmt.Errorf("inspect Task Branch Name ownership in repository %q: %w", alias, err)
+		}
+	}
+	baseRef := ""
+	baseCommit := ""
+	if !branchExisted {
+		remote := configuration.Defaults.Remote
+		if repositoryConfiguration.Remote != "" {
+			remote = repositoryConfiguration.Remote
+		}
+		fetch := configuration.Defaults.Fetch
+		if repositoryConfiguration.Fetch != nil {
+			fetch = *repositoryConfiguration.Fetch
+		}
+		if fetchOverride != nil {
+			fetch = *fetchOverride
+		}
+		resolvedBase, err := gitcmd.ResolveBase(mainCheckout, baseBranch, remote, fetch)
+		if err != nil {
+			if errors.Is(err, gitcmd.ErrBaseRefNotFound) {
+				return AddResult{}, invalid("Base Ref %q for repository %q does not exist: %v", baseBranch, alias, err)
+			}
+			return AddResult{}, fmt.Errorf("resolve Base Ref %q for repository %q: %w", baseBranch, alias, err)
+		}
+		baseRef = resolvedBase.Ref
+		baseCommit = resolvedBase.Commit
 	}
 	worktreesRoot := filepath.Dir(expectedWorktree)
 	rootCreated, err := preflightWorktreeRoot(worktreesRoot)
@@ -142,7 +170,7 @@ func AddRepository(paths config.Paths, configuration config.Config, taskName, re
 		BaseRef:        baseRef,
 		BaseCommit:     baseCommit,
 		Order:          len(metadata.Attachments),
-		BranchExisted:  false,
+		BranchExisted:  branchExisted,
 		ManagedLinks:   make([]workspace.ManagedLink, 0),
 		State:          StateReady,
 	}
@@ -170,7 +198,7 @@ func AddRepository(paths config.Paths, configuration config.Config, taskName, re
 			}
 			if exists, branchError := gitcmd.RefExists(mainCheckout, branchRef); branchError != nil {
 				rollbackErrors = append(rollbackErrors, fmt.Errorf("inspect Task Branch Name during rollback: %w", branchError))
-			} else if exists {
+			} else if exists && !branchExisted {
 				if deleteError := gitcmd.DeleteBranch(mainCheckout, metadata.TaskBranchName); deleteError != nil {
 					rollbackErrors = append(rollbackErrors, fmt.Errorf("delete Task Branch Name: %w", deleteError))
 				}
@@ -192,7 +220,13 @@ func AddRepository(paths config.Paths, configuration config.Config, taskName, re
 		return cause
 	}
 
-	if err := gitcmd.CreateWorktree(mainCheckout, expectedWorktree, metadata.TaskBranchName, baseRef); err != nil {
+	createWorktree := func() error {
+		if branchExisted {
+			return gitcmd.AttachWorktree(mainCheckout, expectedWorktree, metadata.TaskBranchName)
+		}
+		return gitcmd.CreateWorktree(mainCheckout, expectedWorktree, metadata.TaskBranchName, baseRef)
+	}
+	if err := createWorktree(); err != nil {
 		return AddResult{}, rollback(fmt.Errorf("create Task Worktree for repository %q: %w", alias, err), true)
 	}
 	canonicalWorktree, err := filepath.EvalSymlinks(expectedWorktree)

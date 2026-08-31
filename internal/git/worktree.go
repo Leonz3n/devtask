@@ -83,6 +83,19 @@ func WorktreeAt(mainCheckout, path string) (WorktreeRecord, error) {
 	return WorktreeRecord{}, ErrWorktreeRecordNotFound
 }
 
+func WorktreeForBranch(mainCheckout, branchRef string) (WorktreeRecord, error) {
+	records, err := ListWorktrees(mainCheckout)
+	if err != nil {
+		return WorktreeRecord{}, err
+	}
+	for _, record := range records {
+		if record.BranchRef == branchRef {
+			return record, nil
+		}
+	}
+	return WorktreeRecord{}, ErrWorktreeRecordNotFound
+}
+
 func EnsureWorktreesIgnored(mainCheckout string) (*ExcludeUpdate, error) {
 	ignored, err := RunPredicate(mainCheckout, "check-ignore", "--no-index", "--quiet", ".worktrees/.devtask-probe")
 	if err != nil {
@@ -154,6 +167,11 @@ func (update *ExcludeUpdate) Abort() error {
 
 func CreateWorktree(mainCheckout, worktreePath, branch, baseRef string) error {
 	_, err := Run(mainCheckout, "worktree", "add", "--no-track", "-b", branch, worktreePath, baseRef)
+	return err
+}
+
+func AttachWorktree(mainCheckout, worktreePath, branch string) error {
+	_, err := Run(mainCheckout, "worktree", "add", worktreePath, branch)
 	return err
 }
 

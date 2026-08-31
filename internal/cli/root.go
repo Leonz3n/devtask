@@ -61,12 +61,17 @@ func NewRootCommand(stdout, stderr io.Writer) *cobra.Command {
 
 func newTaskAddCommand(stdout io.Writer) *cobra.Command {
 	var base string
+	var fetch bool
+	var noFetch bool
 	command := &cobra.Command{
 		Use:   "add <task> <alias>",
 		Short: "Attach a Registered Repository to a Task",
 		Args: func(cmd *cobra.Command, args []string) error {
 			if err := cobra.ExactArgs(2)(cmd, args); err != nil {
 				return &validationError{err: err}
+			}
+			if cmd.Flags().Changed("fetch") && cmd.Flags().Changed("no-fetch") {
+				return &validationError{err: errors.New("--fetch and --no-fetch are mutually exclusive")}
 			}
 			return nil
 		},
@@ -83,7 +88,14 @@ func newTaskAddCommand(stdout io.Writer) *cobra.Command {
 			if cmd.Flags().Changed("base") {
 				baseOverride = &base
 			}
-			result, err := task.AddRepository(paths, configuration, args[0], args[1], baseOverride)
+			var fetchOverride *bool
+			if cmd.Flags().Changed("fetch") {
+				fetchOverride = &fetch
+			} else if cmd.Flags().Changed("no-fetch") {
+				override := !noFetch
+				fetchOverride = &override
+			}
+			result, err := task.AddRepository(paths, configuration, args[0], args[1], baseOverride, fetchOverride)
 			if err != nil {
 				return err
 			}
@@ -91,11 +103,19 @@ func newTaskAddCommand(stdout io.Writer) *cobra.Command {
 			if result.AlreadyAttached {
 				action = "already attached"
 			}
-			_, err = fmt.Fprintf(stdout, "%s %s to Task %s at %s\n", action, result.Attachment.Alias, result.TaskName, result.Attachment.WorktreePath)
+			if _, err = fmt.Fprintf(stdout, "%s %s to Task %s at %s\n", action, result.Attachment.Alias, result.TaskName, result.Attachment.WorktreePath); err != nil {
+				return err
+			}
+			if !result.AlreadyAttached && result.Attachment.BranchExisted {
+				_, err = fmt.Fprintln(stdout, "existing Task Branch attached; Base Ref was not applied")
+			}
 			return err
 		},
 	}
 	command.Flags().StringVar(&base, "base", "", "local base branch for the new Task Branch")
+	command.Flags().BoolVar(&fetch, "fetch", false, "fetch the configured remote before resolving the Base Ref")
+	command.Flags().BoolVar(&noFetch, "no-fetch", false, "use current refs without fetching")
+	command.MarkFlagsMutuallyExclusive("fetch", "no-fetch")
 	return command
 }
 
