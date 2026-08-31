@@ -1,7 +1,6 @@
 package task
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
 	"os"
@@ -40,6 +39,15 @@ func AddRepository(paths config.Paths, configuration config.Config, taskName, re
 	if err != nil {
 		return AddResult{}, err
 	}
+	for _, attachment := range metadata.Attachments {
+		if !strings.EqualFold(attachment.Alias, repositoryAlias) {
+			continue
+		}
+		if err := verifyExistingAttachment(metadata, attachment, paths); err != nil {
+			return AddResult{}, err
+		}
+		return AddResult{TaskName: metadata.Name, Attachment: attachment, AlreadyAttached: true}, nil
+	}
 	alias, repositoryConfiguration, err := findRegisteredRepository(configuration, repositoryAlias)
 	if err != nil {
 		return AddResult{}, err
@@ -52,16 +60,6 @@ func AddRepository(paths config.Paths, configuration config.Config, taskName, re
 	if err != nil {
 		return AddResult{}, err
 	}
-	for _, attachment := range metadata.Attachments {
-		if !strings.EqualFold(attachment.Alias, alias) {
-			continue
-		}
-		if err := verifyExistingAttachment(metadata, attachment, mainCheckout, expectedWorktree, paths); err != nil {
-			return AddResult{}, err
-		}
-		return AddResult{TaskName: metadata.Name, Attachment: attachment, AlreadyAttached: true}, nil
-	}
-
 	repositoryLockPath, err := gitcmd.RepositoryLockPath(mainCheckout)
 	if err != nil {
 		return AddResult{}, err
@@ -110,6 +108,15 @@ func AddRepository(paths config.Paths, configuration config.Config, taskName, re
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return AddResult{}, fmt.Errorf("inspect Task Worktree path %q: %w", expectedWorktree, err)
 	}
+	if record, err := gitcmd.WorktreeAt(mainCheckout, expectedWorktree); err == nil {
+		detail := record.BranchRef
+		if record.Prunable {
+			detail += " (prunable)"
+		}
+		return AddResult{}, invalid("Git worktree record collision at %q: %s", expectedWorktree, strings.TrimSpace(detail))
+	} else if !errors.Is(err, gitcmd.ErrWorktreeRecordNotFound) {
+		return AddResult{}, fmt.Errorf("inspect Git worktree ownership for %q: %w", expectedWorktree, err)
+	}
 	workspacePath := filepath.Join(paths.Workspaces, metadata.Name)
 	projectionAttachments := make([]workspace.Attachment, 0, len(metadata.Attachments)+1)
 	for _, attachment := range metadata.Attachments {
@@ -122,6 +129,19 @@ func AddRepository(paths config.Paths, configuration config.Config, taskName, re
 			return AddResult{}, invalid("%v", err)
 		}
 		return AddResult{}, err
+	}
+	attachment := RepositoryAttachment{
+		Alias:          alias,
+		MainCheckout:   mainCheckout,
+		WorktreePath:   expectedWorktree,
+		TaskBranchName: metadata.TaskBranchName,
+		BaseBranch:     baseBranch,
+		BaseRef:        baseRef,
+		BaseCommit:     baseCommit,
+		Order:          len(metadata.Attachments),
+		BranchExisted:  false,
+		ManagedLinks:   make([]workspace.ManagedLink, 0),
+		State:          StateReady,
 	}
 
 	excludeChange, err := gitcmd.EnsureWorktreesIgnored(mainCheckout)
@@ -146,7 +166,11 @@ func AddRepository(paths config.Paths, configuration config.Config, taskName, re
 		}
 		rollbackErrors = append(rollbackErrors, excludeChange.Abort())
 		if joined := errors.Join(rollbackErrors...); joined != nil {
-			return fmt.Errorf("%v; roll back Repository Attachment: %w", cause, joined)
+			residuals := observeResidualObjects(metadata.Name, attachment, paths, joined)
+			if persistError := persistIncompleteAttachment(metadataPath, attachment, cause, joined, residuals); persistError != nil {
+				return fmt.Errorf("%v; roll back Repository Attachment: %v; persist incomplete state: %w", cause, joined, persistError)
+			}
+			return fmt.Errorf("%v; roll back Repository Attachment: %v; Task %q is incomplete with residual state; run status and follow recovery guidance", cause, joined, metadata.Name)
 		}
 		return cause
 	}
@@ -164,28 +188,79 @@ func AddRepository(paths config.Paths, configuration config.Config, taskName, re
 	if err := projection.Commit(); err != nil {
 		return AddResult{}, rollback(err, true)
 	}
-	attachment := RepositoryAttachment{
-		Alias:          alias,
-		MainCheckout:   mainCheckout,
-		WorktreePath:   canonicalWorktree,
-		TaskBranchName: metadata.TaskBranchName,
-		BaseBranch:     baseBranch,
-		BaseRef:        baseRef,
-		BaseCommit:     baseCommit,
-		Order:          len(metadata.Attachments),
-		BranchExisted:  false,
-		ManagedLinks:   make([]workspace.ManagedLink, 0),
+	if err := afterProjectionForTest(); err != nil {
+		return AddResult{}, rollback(err, true)
 	}
+	attachment.WorktreePath = canonicalWorktree
 	metadata.Attachments = append(metadata.Attachments, attachment)
 	metadata.ContextFiles = projection.RefreshOwnedContextFiles(metadata.ContextFiles)
 	updatedMetadata, err := yaml.Marshal(metadata)
 	if err != nil {
 		return AddResult{}, rollback(fmt.Errorf("encode Task metadata: %w", err), true)
 	}
-	if err := writeAtomicReplaceIfUnchanged(metadataPath, originalMetadata, updatedMetadata); err != nil {
+	outcome, err := fileutil.WriteAtomicIfUnchanged(metadataPath, originalMetadata, updatedMetadata, 0o600)
+	if err != nil {
+		if outcome.Published {
+			return AddResult{}, fmt.Errorf("Repository Attachment for %q was published but its Task metadata could not be durably synced: %w; inspect the Task before retrying", alias, err)
+		}
 		return AddResult{}, rollback(fmt.Errorf("update Task metadata: %w", err), true)
 	}
 	return AddResult{TaskName: metadata.Name, Attachment: attachment}, nil
+}
+
+func observeResidualObjects(taskName string, attachment RepositoryAttachment, paths config.Paths, rollbackError error) []string {
+	residuals := []string{"rollback error: " + rollbackError.Error()}
+	if _, err := os.Lstat(attachment.WorktreePath); err == nil {
+		residuals = append(residuals, "Task Worktree path remains: "+attachment.WorktreePath)
+	}
+	if record, err := gitcmd.WorktreeAt(attachment.MainCheckout, attachment.WorktreePath); err == nil {
+		residuals = append(residuals, "Git worktree record remains: "+record.Path)
+	}
+	if exists, err := gitcmd.RefExists(attachment.MainCheckout, "refs/heads/"+attachment.TaskBranchName); err == nil && exists {
+		residuals = append(residuals, "Task Branch Name remains: "+attachment.TaskBranchName)
+	}
+	linkPath := filepath.Join(paths.Workspaces, taskName, attachment.Alias)
+	if _, err := os.Lstat(linkPath); err == nil {
+		residuals = append(residuals, "Task Workspace entry remains: "+linkPath)
+	}
+	return residuals
+}
+
+func persistIncompleteAttachment(metadataPath string, attachment RepositoryAttachment, cause, rollbackError error, residuals []string) error {
+	current, err := os.ReadFile(metadataPath)
+	if err != nil {
+		return err
+	}
+	metadata, err := load(metadataPath)
+	if err != nil {
+		return err
+	}
+	attachment.State = StateIncomplete
+	attachment.LastError = cause.Error()
+	attachment.ResidualObjects = residuals
+	metadata.State = StateIncomplete
+	metadata.Attachments = append(metadata.Attachments, attachment)
+	metadata.Incomplete = &IncompleteOperation{
+		Operation:       "add_repository",
+		LastError:       cause.Error() + "; rollback: " + rollbackError.Error(),
+		ResidualObjects: residuals,
+		Recovery: []string{
+			"inspect each residual object before changing it",
+			"restore or remove changed Task Workspace entries, then retry recovery",
+		},
+	}
+	updated, err := yaml.Marshal(metadata)
+	if err != nil {
+		return err
+	}
+	outcome, err := fileutil.WriteAtomicIfUnchanged(metadataPath, current, updated, 0o600)
+	if err != nil {
+		if outcome.Published {
+			return fmt.Errorf("incomplete state was published but not durably synced: %w", err)
+		}
+		return err
+	}
+	return nil
 }
 
 func findRegisteredRepository(configuration config.Config, requested string) (string, config.RepositoryConfig, error) {
@@ -245,57 +320,29 @@ func preflightWorktreeRoot(path string) (bool, error) {
 	return false, nil
 }
 
-func writeAtomicReplaceIfUnchanged(path string, original, updated []byte) error {
-	current, err := os.ReadFile(path)
-	if err != nil {
-		return err
-	}
-	if !bytes.Equal(current, original) {
-		return errors.New("Task metadata changed while it was being updated; retry the command")
-	}
-	directory := filepath.Dir(path)
-	temporary, err := os.CreateTemp(directory, ".task-update-*")
-	if err != nil {
-		return err
-	}
-	temporaryPath := temporary.Name()
-	defer func() {
-		_ = temporary.Close()
-		_ = os.Remove(temporaryPath)
-	}()
-	if err := temporary.Chmod(0o600); err != nil {
-		return err
-	}
-	if _, err := temporary.Write(updated); err != nil {
-		return err
-	}
-	if err := temporary.Sync(); err != nil {
-		return err
-	}
-	if err := temporary.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(temporaryPath, path); err != nil {
-		return err
-	}
-	return fileutil.SyncDirectory(directory)
-}
-
-func verifyExistingAttachment(metadata Metadata, attachment RepositoryAttachment, mainCheckout, expectedWorktree string, paths config.Paths) error {
-	if attachment.MainCheckout != mainCheckout || attachment.WorktreePath != expectedWorktree || attachment.TaskBranchName != metadata.TaskBranchName {
+func verifyExistingAttachment(metadata Metadata, attachment RepositoryAttachment, paths config.Paths) error {
+	if attachment.TaskBranchName != metadata.TaskBranchName {
 		return invalid("Repository Attachment %q does not match its recorded ownership; run status for recovery guidance", attachment.Alias)
 	}
-	canonical, err := filepath.EvalSymlinks(expectedWorktree)
-	if err != nil || canonical != expectedWorktree {
+	canonicalMainCheckout, err := repo.ResolveMainCheckout(attachment.MainCheckout)
+	if err != nil || canonicalMainCheckout != attachment.MainCheckout {
+		return invalid("Repository Attachment %q Main Checkout is missing or changed", attachment.Alias)
+	}
+	canonical, err := filepath.EvalSymlinks(attachment.WorktreePath)
+	if err != nil || canonical != attachment.WorktreePath {
 		return invalid("Repository Attachment %q Task Worktree is missing or changed", attachment.Alias)
 	}
-	branch, err := gitcmd.Run(expectedWorktree, "branch", "--show-current")
+	record, err := gitcmd.WorktreeAt(attachment.MainCheckout, attachment.WorktreePath)
+	if err != nil || record.BranchRef != "refs/heads/"+metadata.TaskBranchName {
+		return invalid("Repository Attachment %q Git worktree ownership is missing or changed", attachment.Alias)
+	}
+	branch, err := gitcmd.Run(attachment.WorktreePath, "branch", "--show-current")
 	if err != nil || strings.TrimSpace(string(branch)) != metadata.TaskBranchName {
 		return invalid("Repository Attachment %q is not on Task Branch Name %q", attachment.Alias, metadata.TaskBranchName)
 	}
 	linkPath := filepath.Join(paths.Workspaces, metadata.Name, attachment.Alias)
 	resolved, err := filepath.EvalSymlinks(linkPath)
-	if err != nil || resolved != expectedWorktree {
+	if err != nil || resolved != attachment.WorktreePath {
 		return invalid("Repository Attachment %q Task Workspace link is missing or changed", attachment.Alias)
 	}
 	return nil

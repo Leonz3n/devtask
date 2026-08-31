@@ -31,17 +31,29 @@ type State string
 
 const StateReady State = "ready"
 
+const StateIncomplete State = "incomplete"
+
+type IncompleteOperation struct {
+	Operation       string   `yaml:"operation"`
+	LastError       string   `yaml:"last_error"`
+	ResidualObjects []string `yaml:"residual_objects"`
+	Recovery        []string `yaml:"recovery"`
+}
+
 type RepositoryAttachment struct {
-	Alias          string                  `yaml:"alias"`
-	MainCheckout   string                  `yaml:"main_checkout"`
-	WorktreePath   string                  `yaml:"worktree_path"`
-	TaskBranchName string                  `yaml:"task_branch_name"`
-	BaseBranch     string                  `yaml:"base_branch"`
-	BaseRef        string                  `yaml:"base_ref"`
-	BaseCommit     string                  `yaml:"base_commit"`
-	Order          int                     `yaml:"order"`
-	BranchExisted  bool                    `yaml:"branch_existed"`
-	ManagedLinks   []workspace.ManagedLink `yaml:"managed_links"`
+	Alias           string                  `yaml:"alias"`
+	MainCheckout    string                  `yaml:"main_checkout"`
+	WorktreePath    string                  `yaml:"worktree_path"`
+	TaskBranchName  string                  `yaml:"task_branch_name"`
+	BaseBranch      string                  `yaml:"base_branch"`
+	BaseRef         string                  `yaml:"base_ref"`
+	BaseCommit      string                  `yaml:"base_commit"`
+	Order           int                     `yaml:"order"`
+	BranchExisted   bool                    `yaml:"branch_existed"`
+	ManagedLinks    []workspace.ManagedLink `yaml:"managed_links"`
+	State           State                   `yaml:"state"`
+	LastError       string                  `yaml:"last_error,omitempty"`
+	ResidualObjects []string                `yaml:"residual_objects,omitempty"`
 }
 
 type Metadata struct {
@@ -52,6 +64,7 @@ type Metadata struct {
 	State          State                   `yaml:"state"`
 	ContextFiles   []workspace.ContextFile `yaml:"context_files"`
 	Attachments    []RepositoryAttachment  `yaml:"attachments"`
+	Incomplete     *IncompleteOperation    `yaml:"incomplete_operation,omitempty"`
 }
 
 type Summary struct {
@@ -222,7 +235,7 @@ func load(path string) (Metadata, error) {
 	if metadata.Name != filenameName {
 		return Metadata{}, invalid("Task metadata %q names Task %q; expected %q", path, metadata.Name, filenameName)
 	}
-	if metadata.State != StateReady {
+	if metadata.State != StateReady && metadata.State != StateIncomplete {
 		return Metadata{}, invalid("unsupported Task state %q in %q", metadata.State, path)
 	}
 	return metadata, nil

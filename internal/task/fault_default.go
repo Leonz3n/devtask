@@ -3,3 +3,5 @@
 package task
 
 func interruptAfterWorkspaceForTest() {}
+
+func afterProjectionForTest() error { return nil }

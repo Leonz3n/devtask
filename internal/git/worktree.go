@@ -2,11 +2,20 @@ package git
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 )
+
+var ErrWorktreeRecordNotFound = errors.New("Git worktree record not found")
+
+type WorktreeRecord struct {
+	Path      string
+	BranchRef string
+	Prunable  bool
+}
 
 type ExcludeUpdate struct {
 	path     string
@@ -30,8 +39,52 @@ func RepositoryLockPath(mainCheckout string) (string, error) {
 	return filepath.Join(canonical, "devtask.lock"), nil
 }
 
+func ListWorktrees(mainCheckout string) ([]WorktreeRecord, error) {
+	output, err := Run(mainCheckout, "worktree", "list", "--porcelain", "-z")
+	if err != nil {
+		return nil, err
+	}
+	blocks := bytes.Split(output, []byte{0, 0})
+	records := make([]WorktreeRecord, 0, len(blocks))
+	for _, block := range blocks {
+		if len(block) == 0 {
+			continue
+		}
+		var record WorktreeRecord
+		for _, field := range bytes.Split(block, []byte{0}) {
+			switch {
+			case bytes.HasPrefix(field, []byte("worktree ")):
+				record.Path = string(field[len("worktree "):])
+			case bytes.HasPrefix(field, []byte("branch ")):
+				record.BranchRef = string(field[len("branch "):])
+			case bytes.HasPrefix(field, []byte("prunable ")):
+				record.Prunable = true
+			}
+		}
+		if record.Path == "" {
+			return nil, errors.New("Git worktree record is missing its path")
+		}
+		records = append(records, record)
+	}
+	return records, nil
+}
+
+func WorktreeAt(mainCheckout, path string) (WorktreeRecord, error) {
+	records, err := ListWorktrees(mainCheckout)
+	if err != nil {
+		return WorktreeRecord{}, err
+	}
+	cleanPath := filepath.Clean(path)
+	for _, record := range records {
+		if filepath.Clean(record.Path) == cleanPath {
+			return record, nil
+		}
+	}
+	return WorktreeRecord{}, ErrWorktreeRecordNotFound
+}
+
 func EnsureWorktreesIgnored(mainCheckout string) (*ExcludeUpdate, error) {
-	ignored, err := Success(mainCheckout, "check-ignore", "--no-index", "--quiet", ".worktrees/.devtask-probe")
+	ignored, err := RunPredicate(mainCheckout, "check-ignore", "--no-index", "--quiet", ".worktrees/.devtask-probe")
 	if err != nil {
 		return nil, fmt.Errorf("check effective ignore for .worktrees: %w", err)
 	}

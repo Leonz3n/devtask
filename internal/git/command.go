@@ -19,7 +19,7 @@ func Run(directory string, arguments ...string) ([]byte, error) {
 	return output, nil
 }
 
-func Success(directory string, arguments ...string) (bool, error) {
+func RunPredicate(directory string, arguments ...string) (bool, error) {
 	command := exec.Command("git", append([]string{"-C", directory}, arguments...)...)
 	output, err := command.CombinedOutput()
 	if err == nil {
@@ -36,7 +36,7 @@ func Success(directory string, arguments ...string) (bool, error) {
 }
 
 func RefExists(directory, ref string) (bool, error) {
-	return Success(directory, "show-ref", "--verify", "--quiet", ref)
+	return RunPredicate(directory, "show-ref", "--verify", "--quiet", ref)
 }
 
 func ValidateBranchName(name string) error {

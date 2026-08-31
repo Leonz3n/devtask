@@ -103,7 +103,7 @@ func (projection *Projection) Commit() error {
 	if err := os.Symlink(projection.linkTarget, projection.linkPath); err != nil {
 		return fmt.Errorf("create Task Workspace link %q: %w", projection.linkPath, err)
 	}
-	if err := writeAtomicReplace(projection.agentsPath, projection.updated, 0o600); err != nil {
+	if _, err := fileutil.WriteAtomic(projection.agentsPath, projection.updated, 0o600); err != nil {
 		_ = os.Remove(projection.linkPath)
 		return fmt.Errorf("update AGENTS.md: %w", err)
 	}
@@ -133,7 +133,7 @@ func (projection *Projection) Abort() error {
 		failures = append(failures, fmt.Errorf("read AGENTS.md during rollback: %w", err))
 	} else if !bytes.Equal(current, projection.updated) {
 		failures = append(failures, fmt.Errorf("refuse to restore changed AGENTS.md %q", projection.agentsPath))
-	} else if err := writeAtomicReplace(projection.agentsPath, projection.original, 0o600); err != nil {
+	} else if _, err := fileutil.WriteAtomic(projection.agentsPath, projection.original, 0o600); err != nil {
 		failures = append(failures, fmt.Errorf("restore AGENTS.md: %w", err))
 	}
 	target, err := os.Readlink(projection.linkPath)
@@ -180,33 +180,4 @@ func generatedSection(taskName, taskBranchName string, attachments []Attachment)
 	}
 	fmt.Fprintf(&output, "%s", GeneratedEnd)
 	return []byte(output.String())
-}
-
-func writeAtomicReplace(path string, contents []byte, mode os.FileMode) error {
-	directory := filepath.Dir(path)
-	temporary, err := os.CreateTemp(directory, ".devtask-agents-*")
-	if err != nil {
-		return err
-	}
-	temporaryPath := temporary.Name()
-	defer func() {
-		_ = temporary.Close()
-		_ = os.Remove(temporaryPath)
-	}()
-	if err := temporary.Chmod(mode); err != nil {
-		return err
-	}
-	if _, err := temporary.Write(contents); err != nil {
-		return err
-	}
-	if err := temporary.Sync(); err != nil {
-		return err
-	}
-	if err := temporary.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(temporaryPath, path); err != nil {
-		return err
-	}
-	return fileutil.SyncDirectory(directory)
 }

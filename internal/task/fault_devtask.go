@@ -3,6 +3,7 @@
 package task
 
 import (
+	"errors"
 	"os"
 	"time"
 
@@ -22,4 +23,20 @@ func interruptAfterWorkspaceForTest() {
 			time.Sleep(time.Millisecond)
 		}
 	}
+}
+
+func afterProjectionForTest() error {
+	if signalPath := os.Getenv("DEVTASK_TEST_PAUSE_AFTER_PROJECTION"); signalPath != "" {
+		_ = os.WriteFile(signalPath+".ready", nil, 0o600)
+		for {
+			if _, err := os.Stat(signalPath + ".continue"); err == nil {
+				break
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}
+	if os.Getenv("DEVTASK_TEST_FAIL_AFTER_PROJECTION") == "1" {
+		return errors.New("injected metadata update failure")
+	}
+	return nil
 }

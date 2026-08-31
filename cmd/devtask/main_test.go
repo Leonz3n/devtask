@@ -33,21 +33,30 @@ type persistedTask struct {
 	TaskBranchName string    `yaml:"task_branch_name"`
 	CreatedAt      time.Time `yaml:"created_at"`
 	State          string    `yaml:"state"`
-	ContextFiles   []struct {
+	Incomplete     *struct {
+		Operation       string   `yaml:"operation"`
+		LastError       string   `yaml:"last_error"`
+		ResidualObjects []string `yaml:"residual_objects"`
+		Recovery        []string `yaml:"recovery"`
+	} `yaml:"incomplete_operation"`
+	ContextFiles []struct {
 		Path   string `yaml:"path"`
 		SHA256 string `yaml:"sha256"`
 	} `yaml:"context_files"`
 	Attachments []struct {
-		Alias          string `yaml:"alias"`
-		MainCheckout   string `yaml:"main_checkout"`
-		WorktreePath   string `yaml:"worktree_path"`
-		TaskBranchName string `yaml:"task_branch_name"`
-		BaseBranch     string `yaml:"base_branch"`
-		BaseRef        string `yaml:"base_ref"`
-		BaseCommit     string `yaml:"base_commit"`
-		Order          int    `yaml:"order"`
-		BranchExisted  bool   `yaml:"branch_existed"`
-		ManagedLinks   []any  `yaml:"managed_links"`
+		Alias           string   `yaml:"alias"`
+		MainCheckout    string   `yaml:"main_checkout"`
+		WorktreePath    string   `yaml:"worktree_path"`
+		TaskBranchName  string   `yaml:"task_branch_name"`
+		BaseBranch      string   `yaml:"base_branch"`
+		BaseRef         string   `yaml:"base_ref"`
+		BaseCommit      string   `yaml:"base_commit"`
+		Order           int      `yaml:"order"`
+		BranchExisted   bool     `yaml:"branch_existed"`
+		ManagedLinks    []any    `yaml:"managed_links"`
+		State           string   `yaml:"state"`
+		LastError       string   `yaml:"last_error"`
+		ResidualObjects []string `yaml:"residual_objects"`
 	} `yaml:"attachments"`
 }
 
@@ -929,6 +938,11 @@ func TestAddCreatesFirstRepositoryAttachmentFromLocalBase(t *testing.T) {
 	if !strings.HasPrefix(string(updatedAgents), manualPrefix) || !strings.Contains(string(updatedAgents), "- `invoice`: `"+canonicalWorktree+"`") {
 		t.Fatalf("AGENTS.md did not preserve manual text and list attachment:\n%s", updatedAgents)
 	}
+	replacement := filepath.Join(t.TempDir(), "replacement-service")
+	gitRun(t, "init", "-b", "main", replacement)
+	if updated := environment.run(t, "repo", "add", "invoice", replacement, "--update"); updated.code != 0 {
+		t.Fatalf("repo add --update failed: %s", updated.stderr)
+	}
 
 	idempotent := environment.run(t, "add", "billing", "invoice", "--base", "other")
 	if idempotent.code != 0 || !strings.Contains(idempotent.stdout, "already attached") {
@@ -1026,6 +1040,29 @@ func TestAddRejectsWorkspaceOwnershipCollisionBeforeGitMutation(t *testing.T) {
 	if !bytes.Equal(excludeAfterWorktreeCollision, excludeBefore) {
 		t.Fatalf("worktree collision changed local exclude:\nbefore: %s\nafter: %s", excludeBefore, excludeAfterWorktreeCollision)
 	}
+	if err := os.Remove(worktreeCollision); err != nil {
+		t.Fatal(err)
+	}
+	gitRun(t, "-C", repository, "worktree", "add", "--detach", worktreeCollision, "main")
+	if err := os.RemoveAll(worktreeCollision); err != nil {
+		t.Fatal(err)
+	}
+
+	result = environment.run(t, "add", "billing", "service")
+
+	if result.code != 2 || !strings.Contains(result.stderr, "Git worktree record collision") {
+		t.Fatalf("stale worktree collision result: code=%d stderr=%q", result.code, result.stderr)
+	}
+	if exists := gitRun(t, "-C", repository, "branch", "--list", "feat/billing"); exists != "" {
+		t.Fatalf("stale worktree collision created Task Branch: %q", exists)
+	}
+	excludeAfterStaleCollision, err := os.ReadFile(excludePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(excludeAfterStaleCollision, excludeBefore) {
+		t.Fatalf("stale worktree collision changed local exclude:\nbefore: %s\nafter: %s", excludeBefore, excludeAfterStaleCollision)
+	}
 }
 
 func TestAddDoesNotRewriteAnEffectiveWorktreeIgnore(t *testing.T) {
@@ -1120,6 +1157,144 @@ func TestAddFailsImmediatelyWhenMutationLockIsBusy(t *testing.T) {
 				t.Fatalf("busy add created Task Branch: %q", exists)
 			}
 		})
+	}
+}
+
+func TestAddPersistsIncompleteAttachmentWhenRollbackCannotRestoreProjection(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("devtask v1 supports macOS and Linux")
+	}
+	environment := initializedCLIEnvironment(t)
+	repository := filepath.Join(t.TempDir(), "service")
+	gitRun(t, "init", "-b", "main", repository)
+	if err := os.WriteFile(filepath.Join(repository, "tracked.txt"), []byte("tracked\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitRun(t, "-C", repository, "add", "tracked.txt")
+	gitRun(t, "-C", repository, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "initial")
+	if result := environment.run(t, "repo", "add", "service", repository); result.code != 0 {
+		t.Fatalf("repo add failed: %s", result.stderr)
+	}
+	if result := environment.run(t, "new", "billing"); result.code != 0 {
+		t.Fatalf("new failed: %s", result.stderr)
+	}
+
+	binary := devtaskBinaryWithTags(t, "devtask_test")
+	signalPath := filepath.Join(t.TempDir(), "projection")
+	command := exec.Command(binary, "add", "billing", "service")
+	command.Dir = environment.home
+	command.Env = append(filteredEnvironment(os.Environ()),
+		"HOME="+environment.home,
+		"XDG_CONFIG_HOME="+environment.configHome,
+		"XDG_DATA_HOME="+environment.dataHome,
+		"DEVTASK_TEST_PAUSE_AFTER_PROJECTION="+signalPath,
+		"DEVTASK_TEST_FAIL_AFTER_PROJECTION=1",
+	)
+	var stderr bytes.Buffer
+	command.Stderr = &stderr
+	if err := command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if command.ProcessState == nil {
+			_ = command.Process.Kill()
+			_ = command.Wait()
+		}
+	})
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if _, err := os.Stat(signalPath + ".ready"); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("add did not reach the projection boundary")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	linkPath := filepath.Join(environment.dataHome, "devtask", "workspaces", "billing", "service")
+	if err := os.Remove(linkPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(linkPath, []byte("user replacement\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(signalPath+".continue", nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err := command.Wait()
+	if err == nil {
+		t.Fatal("fault-enabled add succeeded")
+	}
+	if exitError, ok := err.(*exec.ExitError); !ok || exitError.ExitCode() != 1 {
+		t.Fatalf("add error = %v, want exit 1; stderr: %s", err, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "roll back Repository Attachment") || !strings.Contains(stderr.String(), "incomplete") {
+		t.Fatalf("stderr = %q, want incomplete rollback diagnostic", stderr.String())
+	}
+	metadata := readPersistedTask(t, environment, "billing")
+	if metadata.State != "incomplete" || metadata.Incomplete == nil || metadata.Incomplete.Operation != "add_repository" || len(metadata.Incomplete.ResidualObjects) == 0 {
+		t.Fatalf("incomplete Task metadata = %#v", metadata)
+	}
+	if len(metadata.Attachments) != 1 || metadata.Attachments[0].State != "incomplete" || metadata.Attachments[0].LastError == "" || len(metadata.Attachments[0].ResidualObjects) == 0 {
+		t.Fatalf("Incomplete Attachment = %#v", metadata.Attachments)
+	}
+	if contents, err := os.ReadFile(linkPath); err != nil || string(contents) != "user replacement\n" {
+		t.Fatalf("rollback changed user replacement: contents=%q error=%v", contents, err)
+	}
+}
+
+func TestAddKeepsPublishedAttachmentWhenMetadataDirectorySyncFails(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("devtask v1 supports macOS and Linux")
+	}
+	environment := initializedCLIEnvironment(t)
+	repository := filepath.Join(t.TempDir(), "service")
+	gitRun(t, "init", "-b", "main", repository)
+	if err := os.WriteFile(filepath.Join(repository, "tracked.txt"), []byte("tracked\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitRun(t, "-C", repository, "add", "tracked.txt")
+	gitRun(t, "-C", repository, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "initial")
+	if result := environment.run(t, "repo", "add", "service", repository); result.code != 0 {
+		t.Fatalf("repo add failed: %s", result.stderr)
+	}
+	if result := environment.run(t, "new", "billing"); result.code != 0 {
+		t.Fatalf("new failed: %s", result.stderr)
+	}
+	metadataPath := filepath.Join(environment.dataHome, "devtask", "tasks", "billing.yaml")
+	binary := devtaskBinaryWithTags(t, "devtask_test")
+	command := exec.Command(binary, "add", "billing", "service")
+	command.Dir = environment.home
+	command.Env = append(filteredEnvironment(os.Environ()),
+		"HOME="+environment.home,
+		"XDG_CONFIG_HOME="+environment.configHome,
+		"XDG_DATA_HOME="+environment.dataHome,
+		"DEVTASK_TEST_FAIL_SYNC_AFTER_PUBLISH="+metadataPath,
+	)
+	output, err := command.CombinedOutput()
+	if err == nil {
+		t.Fatal("fault-enabled add succeeded")
+	}
+	if exitError, ok := err.(*exec.ExitError); !ok || exitError.ExitCode() != 1 {
+		t.Fatalf("add error = %v, want exit 1: %s", err, output)
+	}
+	if !strings.Contains(string(output), "was published") || !strings.Contains(string(output), "durably synced") {
+		t.Fatalf("add output = %q, want published-state diagnostic", output)
+	}
+	metadata := readPersistedTask(t, environment, "billing")
+	if metadata.State != "ready" || len(metadata.Attachments) != 1 || metadata.Attachments[0].State != "ready" {
+		t.Fatalf("published metadata = %#v", metadata)
+	}
+	worktree := filepath.Join(repository, ".worktrees", "billing")
+	if branch := gitRun(t, "-C", worktree, "branch", "--show-current"); branch != "feat/billing" {
+		t.Fatalf("published attachment Task Branch = %q", branch)
+	}
+	linkPath := filepath.Join(environment.dataHome, "devtask", "workspaces", "billing", "service")
+	if resolved, err := filepath.EvalSymlinks(linkPath); err != nil || resolved != worktree {
+		canonicalWorktree, _ := filepath.EvalSymlinks(worktree)
+		if err != nil || resolved != canonicalWorktree {
+			t.Fatalf("published attachment Workspace link = %q, %v", resolved, err)
+		}
 	}
 }
 
