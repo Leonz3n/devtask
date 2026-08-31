@@ -1241,6 +1241,70 @@ func TestAddPersistsIncompleteAttachmentWhenRollbackCannotRestoreProjection(t *t
 	if contents, err := os.ReadFile(linkPath); err != nil || string(contents) != "user replacement\n" {
 		t.Fatalf("rollback changed user replacement: contents=%q error=%v", contents, err)
 	}
+	secondRepository := filepath.Join(t.TempDir(), "second-service")
+	gitRun(t, "init", "-b", "main", secondRepository)
+	if result := environment.run(t, "repo", "add", "second", secondRepository); result.code != 0 {
+		t.Fatalf("register second repository: %s", result.stderr)
+	}
+	blocked := environment.run(t, "add", "billing", "second")
+	if blocked.code != 2 || !strings.Contains(blocked.stderr, "Task \"billing\" is incomplete") {
+		t.Fatalf("add to incomplete Task: code=%d stderr=%q", blocked.code, blocked.stderr)
+	}
+}
+
+func TestAddRecordsIncompleteStateWhenAgentsPublishCannotBeDurablySynced(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("devtask v1 supports macOS and Linux")
+	}
+	environment := initializedCLIEnvironment(t)
+	repository := filepath.Join(t.TempDir(), "service")
+	gitRun(t, "init", "-b", "main", repository)
+	if err := os.WriteFile(filepath.Join(repository, "tracked.txt"), []byte("tracked\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitRun(t, "-C", repository, "add", "tracked.txt")
+	gitRun(t, "-C", repository, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "initial")
+	if result := environment.run(t, "repo", "add", "service", repository); result.code != 0 {
+		t.Fatalf("repo add failed: %s", result.stderr)
+	}
+	if result := environment.run(t, "new", "billing"); result.code != 0 {
+		t.Fatalf("new failed: %s", result.stderr)
+	}
+	agentsPath := filepath.Join(environment.dataHome, "devtask", "workspaces", "billing", "AGENTS.md")
+	originalAgents, err := os.ReadFile(agentsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	binary := devtaskBinaryWithTags(t, "devtask_test")
+	command := exec.Command(binary, "add", "billing", "service")
+	command.Dir = environment.home
+	command.Env = append(filteredEnvironment(os.Environ()),
+		"HOME="+environment.home,
+		"XDG_CONFIG_HOME="+environment.configHome,
+		"XDG_DATA_HOME="+environment.dataHome,
+		"DEVTASK_TEST_FAIL_SYNC_AFTER_PUBLISH="+agentsPath,
+	)
+	output, err := command.CombinedOutput()
+	if err == nil {
+		t.Fatal("fault-enabled add succeeded")
+	}
+	if !strings.Contains(string(output), "incomplete with residual state") {
+		t.Fatalf("add output = %q, want incomplete projection diagnostic", output)
+	}
+	metadata := readPersistedTask(t, environment, "billing")
+	if metadata.State != "incomplete" || metadata.Incomplete == nil || len(metadata.Attachments) != 1 || metadata.Attachments[0].State != "incomplete" {
+		t.Fatalf("projection failure metadata = %#v", metadata)
+	}
+	currentAgents, err := os.ReadFile(agentsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(currentAgents, originalAgents) {
+		t.Fatalf("projection rollback left generated AGENTS content:\n%s", currentAgents)
+	}
+	if _, err := os.Lstat(filepath.Join(environment.dataHome, "devtask", "workspaces", "billing", "service")); !os.IsNotExist(err) {
+		t.Fatalf("projection rollback left Workspace link: %v", err)
+	}
 }
 
 func TestAddKeepsPublishedAttachmentWhenMetadataDirectorySyncFails(t *testing.T) {

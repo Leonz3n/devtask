@@ -65,13 +65,13 @@ func writeAtomic(path string, original, contents []byte, mode os.FileMode) (Writ
 	displaced, err := os.ReadFile(temporaryPath)
 	if err != nil {
 		if rollbackError := restoreDisplaced(temporaryPath, path, directory); rollbackError != nil {
-			return WriteOutcome{Published: true}, fmt.Errorf("inspect displaced file: %v; restore it: %w", err, rollbackError)
+			return observedOutcome(path, contents), fmt.Errorf("inspect displaced file: %v; restore it: %w", err, rollbackError)
 		}
 		return WriteOutcome{}, fmt.Errorf("inspect displaced file: %w", err)
 	}
 	if !bytes.Equal(displaced, original) {
 		if err := restoreDisplaced(temporaryPath, path, directory); err != nil {
-			return WriteOutcome{Published: true}, fmt.Errorf("%w; restore external edit: %v", ErrConcurrentChange, err)
+			return observedOutcome(path, contents), fmt.Errorf("%w; restore external edit: %v", ErrConcurrentChange, err)
 		}
 		return WriteOutcome{}, ErrConcurrentChange
 	}
@@ -82,6 +82,14 @@ func writeAtomic(path string, original, contents []byte, mode os.FileMode) (Writ
 		return WriteOutcome{Published: true}, err
 	}
 	return WriteOutcome{Published: true}, SyncDirectory(directory)
+}
+
+func observedOutcome(path string, publishedContents []byte) WriteOutcome {
+	current, err := os.ReadFile(path)
+	if err != nil {
+		return WriteOutcome{Published: true}
+	}
+	return WriteOutcome{Published: bytes.Equal(current, publishedContents)}
 }
 
 func restoreDisplaced(temporaryPath, path, directory string) error {

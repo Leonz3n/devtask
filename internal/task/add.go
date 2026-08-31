@@ -39,6 +39,9 @@ func AddRepository(paths config.Paths, configuration config.Config, taskName, re
 	if err != nil {
 		return AddResult{}, err
 	}
+	if metadata.State == StateIncomplete {
+		return AddResult{}, invalid("Task %q is incomplete; run status and follow recovery guidance before adding repositories", metadata.Name)
+	}
 	for _, attachment := range metadata.Attachments {
 		if !strings.EqualFold(attachment.Alias, repositoryAlias) {
 			continue

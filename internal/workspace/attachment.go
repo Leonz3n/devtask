@@ -24,14 +24,15 @@ type Attachment struct {
 }
 
 type Projection struct {
-	workspacePath string
-	agentsPath    string
-	linkPath      string
-	linkTarget    string
-	original      []byte
-	updated       []byte
-	agentsInfo    os.FileInfo
-	committed     bool
+	workspacePath   string
+	agentsPath      string
+	linkPath        string
+	linkTarget      string
+	original        []byte
+	updated         []byte
+	agentsInfo      os.FileInfo
+	linkCreated     bool
+	agentsPublished bool
 }
 
 func PrepareProjection(workspacePath, taskName, taskBranchName, alias, worktreePath string, attachments []Attachment) (*Projection, error) {
@@ -103,11 +104,19 @@ func (projection *Projection) Commit() error {
 	if err := os.Symlink(projection.linkTarget, projection.linkPath); err != nil {
 		return fmt.Errorf("create Task Workspace link %q: %w", projection.linkPath, err)
 	}
-	if _, err := fileutil.WriteAtomic(projection.agentsPath, projection.updated, 0o600); err != nil {
-		_ = os.Remove(projection.linkPath)
+	projection.linkCreated = true
+	outcome, err := fileutil.WriteAtomicIfUnchanged(projection.agentsPath, projection.original, projection.updated, 0o600)
+	if err != nil {
+		projection.agentsPublished = outcome.Published
+		if !outcome.Published {
+			if removeError := os.Remove(projection.linkPath); removeError != nil {
+				return errors.Join(fmt.Errorf("update AGENTS.md: %w", err), fmt.Errorf("remove Task Workspace link: %w", removeError))
+			}
+			projection.linkCreated = false
+		}
 		return fmt.Errorf("update AGENTS.md: %w", err)
 	}
-	projection.committed = true
+	projection.agentsPublished = true
 	return fileutil.SyncDirectory(projection.workspacePath)
 }
 
@@ -124,27 +133,35 @@ func (projection *Projection) RefreshOwnedContextFiles(files []ContextFile) []Co
 }
 
 func (projection *Projection) Abort() error {
-	if !projection.committed {
+	if !projection.linkCreated && !projection.agentsPublished {
 		return nil
 	}
 	var failures []error
-	current, err := os.ReadFile(projection.agentsPath)
-	if err != nil {
-		failures = append(failures, fmt.Errorf("read AGENTS.md during rollback: %w", err))
-	} else if !bytes.Equal(current, projection.updated) {
-		failures = append(failures, fmt.Errorf("refuse to restore changed AGENTS.md %q", projection.agentsPath))
-	} else if _, err := fileutil.WriteAtomic(projection.agentsPath, projection.original, 0o600); err != nil {
-		failures = append(failures, fmt.Errorf("restore AGENTS.md: %w", err))
-	}
-	target, err := os.Readlink(projection.linkPath)
-	if err != nil {
-		if !errors.Is(err, os.ErrNotExist) {
-			failures = append(failures, fmt.Errorf("inspect Task Workspace link during rollback: %w", err))
+	if projection.agentsPublished {
+		outcome, err := fileutil.WriteAtomicIfUnchanged(projection.agentsPath, projection.updated, projection.original, 0o600)
+		if err != nil {
+			failures = append(failures, fmt.Errorf("restore AGENTS.md: %w", err))
+		} else if !outcome.Published {
+			failures = append(failures, fmt.Errorf("restore AGENTS.md %q was not published", projection.agentsPath))
+		} else {
+			projection.agentsPublished = false
 		}
-	} else if target != projection.linkTarget {
-		failures = append(failures, fmt.Errorf("refuse to remove changed Task Workspace link %q", projection.linkPath))
-	} else if err := os.Remove(projection.linkPath); err != nil {
-		failures = append(failures, fmt.Errorf("remove Task Workspace link: %w", err))
+	}
+	if projection.linkCreated {
+		target, err := os.Readlink(projection.linkPath)
+		if err != nil {
+			if !errors.Is(err, os.ErrNotExist) {
+				failures = append(failures, fmt.Errorf("inspect Task Workspace link during rollback: %w", err))
+			} else {
+				projection.linkCreated = false
+			}
+		} else if target != projection.linkTarget {
+			failures = append(failures, fmt.Errorf("refuse to remove changed Task Workspace link %q", projection.linkPath))
+		} else if err := os.Remove(projection.linkPath); err != nil {
+			failures = append(failures, fmt.Errorf("remove Task Workspace link: %w", err))
+		} else {
+			projection.linkCreated = false
+		}
 	}
 	return errors.Join(failures...)
 }
