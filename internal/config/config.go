@@ -292,7 +292,7 @@ func (configuration Config) validate() error {
 		groupNames[foldedName] = name
 		for _, alias := range aliases {
 			if _, exists := repositoriesByFoldedAlias[strings.ToLower(alias)]; !exists {
-				return invalid("repository group %q references unknown repository alias %q", name, alias)
+				return invalid("Repository Group %q references unknown Repository Alias %q", name, alias)
 			}
 		}
 	}

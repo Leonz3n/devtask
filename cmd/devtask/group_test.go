@@ -116,7 +116,7 @@ func TestNewGroupRejectsInvalidSelectionsBeforeTaskCreation(t *testing.T) {
 				configuration.Groups["delivery"] = []string{"missing"}
 			},
 			arguments: []string{"--group", "delivery"},
-			wantError: "references unknown repository alias",
+			wantError: "references unknown Repository Alias",
 		},
 		{
 			name: "ineffective exclusion",
