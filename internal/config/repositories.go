@@ -179,6 +179,7 @@ func configurationNodes(contents []byte) (*yaml.Node, *yaml.Node, error) {
 }
 
 func encodeAndValidate(document *yaml.Node) ([]byte, error) {
+	normalizeCollectionStyle(document)
 	var output bytes.Buffer
 	encoder := yaml.NewEncoder(&output)
 	encoder.SetIndent(2)
@@ -192,6 +193,15 @@ func encodeAndValidate(document *yaml.Node) ([]byte, error) {
 		return nil, err
 	}
 	return output.Bytes(), nil
+}
+
+func normalizeCollectionStyle(node *yaml.Node) {
+	if node.Kind == yaml.MappingNode || node.Kind == yaml.SequenceNode {
+		node.Style &^= yaml.FlowStyle
+	}
+	for _, child := range node.Content {
+		normalizeCollectionStyle(child)
+	}
 }
 
 func writeIfUnchanged(path string, original, contents []byte) error {

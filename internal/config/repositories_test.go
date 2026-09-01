@@ -56,6 +56,37 @@ func TestRegisterRepositoryReportsActionsAndPreservesComments(t *testing.T) {
 	}
 }
 
+func TestRegisterRepositoryNormalizesPopulatedCollectionsToBlockStyle(t *testing.T) {
+	directory := t.TempDir()
+	first := filepath.Join(directory, "first")
+	second := filepath.Join(directory, "second")
+	for _, path := range []string{first, second} {
+		if err := os.Mkdir(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	paths := Paths{
+		ConfigFile: filepath.Join(directory, "config.yaml"),
+		LockFile:   filepath.Join(directory, "config.lock"),
+	}
+	original := "schema_version: 1\nrepositories: {first: {path: " + first + ", shared_paths: [.env]}}\ngroups: {}\n"
+	if err := os.WriteFile(paths.ConfigFile, []byte(original), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := RegisterRepository(paths, "second", second, false); err != nil {
+		t.Fatal(err)
+	}
+	contents, err := os.ReadFile(paths.ConfigFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "repositories:\n  first:\n    path: " + first + "\n    shared_paths:\n      - .env\n  second:\n    path: " + second + "\ngroups: {}\n"
+	if !strings.Contains(string(contents), want) {
+		t.Fatalf("configuration did not normalize populated collections to block style:\n%s", contents)
+	}
+}
+
 func TestListRepositoriesCanonicalizesHumanEditedPath(t *testing.T) {
 	root := t.TempDir()
 	nested := filepath.Join(root, "nested")
