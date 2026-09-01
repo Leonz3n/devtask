@@ -1,5 +1,7 @@
 # devtask
 
+**English** | [简体中文](./README.zh-CN.md)
+
 `devtask` coordinates one local development **Task** across several existing Git repositories. It creates an independent **Task Worktree** in each **Registered Repository**, joins them in a non-Git **Task Workspace**, and launches Pi, Claude Code, or Codex with access to the same files.
 
 devtask v1 supports macOS and Linux. It never clones repositories, changes a **Main Checkout**, commits, pushes, merges, prunes worktrees, or creates pull requests.
