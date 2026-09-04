@@ -34,6 +34,13 @@ func ResolvePaths() (Paths, error) {
 	}, nil
 }
 
+func (paths Paths) WithTaskWorkspaceRoot(configuration Config) Paths {
+	if configuration.TaskWorkspaceRoot != "" {
+		paths.Workspaces = filepath.Clean(configuration.TaskWorkspaceRoot)
+	}
+	return paths
+}
+
 func absoluteEnvironmentPath(name, fallback string) string {
 	value := os.Getenv(name)
 	if filepath.IsAbs(value) {

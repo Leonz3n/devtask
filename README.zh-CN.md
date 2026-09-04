@@ -82,10 +82,15 @@ devtask remove billing-rollout
 
 Task metadata 和 Task Workspaces 在 `XDG_DATA_HOME` 为绝对路径时使用 `$XDG_DATA_HOME/devtask`，否则使用 `~/.local/share/devtask`。其他命令不会隐式初始化状态。
 
+如果希望在 Finder 或只支持单目录的 Agent 中直接打开 Task Workspace，可以设置顶层 `task_workspace_root`。该值必须是绝对路径；YAML 中的 `~` 不会展开。请在创建 Task 前完成设置；devtask 不会搬迁已经存在的 Task Workspace。
+
 完整配置示例：
 
 ```yaml
 schema_version: 1
+
+# 可选；必须是绝对路径。未配置时使用 XDG data 目录下的 devtask/workspaces。
+task_workspace_root: /Users/me/DevTasks
 
 defaults:
   base_branch: main

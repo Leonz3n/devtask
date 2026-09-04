@@ -24,6 +24,7 @@ func Initialize(paths Paths) error {
 	}
 	defer configLock.Close()
 
+	configuration := Default()
 	if _, err := os.Stat(paths.ConfigFile); errors.Is(err, os.ErrNotExist) {
 		contents, err := marshal(Default())
 		if err != nil {
@@ -34,10 +35,14 @@ func Initialize(paths Paths) error {
 		}
 	} else if err != nil {
 		return fmt.Errorf("inspect configuration: %w", err)
-	} else if _, err := Load(paths.ConfigFile); err != nil {
-		return err
+	} else {
+		configuration, err = Load(paths.ConfigFile)
+		if err != nil {
+			return err
+		}
 	}
 
+	paths = paths.WithTaskWorkspaceRoot(configuration)
 	for _, directory := range []string{paths.DataDir, paths.TasksDir, paths.Workspaces} {
 		if err := os.MkdirAll(directory, 0o700); err != nil {
 			return fmt.Errorf("create state directory %q: %w", directory, err)

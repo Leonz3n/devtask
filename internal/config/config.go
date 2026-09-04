@@ -29,11 +29,12 @@ var reservedRepositoryAliases = map[string]struct{}{
 }
 
 type Config struct {
-	SchemaVersion int                         `yaml:"schema_version"`
-	Defaults      Defaults                    `yaml:"defaults"`
-	Agents        Agents                      `yaml:"agents"`
-	Repositories  map[string]RepositoryConfig `yaml:"repositories"`
-	Groups        map[string][]string         `yaml:"groups"`
+	SchemaVersion     int                         `yaml:"schema_version"`
+	TaskWorkspaceRoot string                      `yaml:"task_workspace_root,omitempty"`
+	Defaults          Defaults                    `yaml:"defaults"`
+	Agents            Agents                      `yaml:"agents"`
+	Repositories      map[string]RepositoryConfig `yaml:"repositories"`
+	Groups            map[string][]string         `yaml:"groups"`
 }
 
 type Defaults struct {
@@ -227,6 +228,9 @@ func validateBranchTemplate(root *parse.ListNode) error {
 func (configuration Config) validate() error {
 	if configuration.SchemaVersion != SchemaVersion {
 		return invalid("unsupported schema_version %d; supported version is %d", configuration.SchemaVersion, SchemaVersion)
+	}
+	if configuration.TaskWorkspaceRoot != "" && !filepath.IsAbs(configuration.TaskWorkspaceRoot) {
+		return invalid("task_workspace_root must be an absolute path")
 	}
 	if strings.TrimSpace(configuration.Defaults.BaseBranch) == "" {
 		return invalid("defaults.base_branch must not be empty")

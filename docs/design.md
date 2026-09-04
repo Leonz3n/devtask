@@ -37,7 +37,7 @@ $XDG_DATA_HOME/devtask/tasks/<task>.yaml
 $XDG_DATA_HOME/devtask/workspaces/<task>/
 ```
 
-Defaults are `~/.config` and `~/.local/share`. State directories use mode `0700` and newly created metadata files use `0600`. `init` is explicit and idempotent; other commands fail with a concise initialization instruction when state is absent.
+Defaults are `~/.config` and `~/.local/share`. The optional absolute `task_workspace_root` configuration moves only the Task Workspace root; it does not relocate configuration or Task metadata and does not migrate existing Task Workspaces. State directories use mode `0700` and newly created metadata files use `0600`. `init` is explicit and idempotent; other commands fail with a concise initialization instruction when state is absent.
 
 Configuration and Task metadata include `schema_version: 1`. Unknown fields or schema versions are errors. Writes use a temporary file in the destination directory, file sync, atomic rename, and directory sync. Advisory file locks are held through each mutation: one config lock, one lock per Task, and one lock per canonical Registered Repository participating in a Git mutation. Multi-repository commands acquire repository locks in canonical-path order to avoid deadlock. A busy lock fails clearly instead of waiting indefinitely. Locks are never bypassed by `--force`.
 
@@ -45,6 +45,8 @@ Configuration is human-editable:
 
 ```yaml
 schema_version: 1
+
+task_workspace_root: /Users/me/DevTasks
 
 defaults:
   base_branch: main

@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -41,6 +42,54 @@ func TestPiLauncherUsesEmptyTaskWorkspaceAndPreservesProcessContract(t *testing.
 	}
 	if result.stderr != "stderr=input from terminal\n" {
 		t.Fatalf("stderr = %q, want child stderr only", result.stderr)
+	}
+}
+
+func TestCustomTaskWorkspaceRootIsUsedAcrossTaskCommands(t *testing.T) {
+	environment := initializedCLIEnvironment(t)
+	customRoot := filepath.Join(environment.home, "DevTasks")
+	updateConfiguration(t, environment, func(configuration *config.Config) {
+		configuration.TaskWorkspaceRoot = customRoot
+	})
+
+	if result := environment.run(t, "new", "billing"); result.code != 0 {
+		t.Fatalf("new failed: %s", result.stderr)
+	}
+	workspace := filepath.Join(customRoot, "billing")
+	if info, err := os.Stat(workspace); err != nil || !info.IsDir() {
+		t.Fatalf("custom Task Workspace: info=%v error=%v", info, err)
+	}
+	defaultWorkspace := filepath.Join(environment.dataHome, "devtask", "workspaces", "billing")
+	if _, err := os.Stat(defaultWorkspace); !os.IsNotExist(err) {
+		t.Fatalf("default Task Workspace unexpectedly exists: %v", err)
+	}
+
+	status := environment.run(t, "status", "billing", "--json")
+	if status.code != 0 {
+		t.Fatalf("status failed: %s", status.stderr)
+	}
+	var report struct {
+		WorkspacePath string `json:"workspace_path"`
+	}
+	if err := json.Unmarshal([]byte(status.stdout), &report); err != nil {
+		t.Fatalf("decode status: %v", err)
+	}
+	if report.WorkspacePath != workspace {
+		t.Fatalf("status workspace_path = %q, want %q", report.WorkspacePath, workspace)
+	}
+
+	fake := writeFakeLauncherExecutable(t)
+	configureLauncherCommand(t, environment, "pi", fake)
+	launched := environment.runWithInput(t, "hello\n", "pi", "billing")
+	if launched.code != 23 || !strings.Contains(launched.stdout, "cwd="+workspace+"\n") {
+		t.Fatalf("Pi launch: code=%d stdout=%q stderr=%q", launched.code, launched.stdout, launched.stderr)
+	}
+
+	if result := environment.run(t, "remove", "billing"); result.code != 0 {
+		t.Fatalf("remove failed: %s", result.stderr)
+	}
+	if _, err := os.Stat(workspace); !os.IsNotExist(err) {
+		t.Fatalf("removed custom Task Workspace remains: %v", err)
 	}
 }
 

@@ -86,11 +86,7 @@ func newTaskRemoveCommand(stdout io.Writer) *cobra.Command {
 			return nil
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			paths, err := config.ResolvePaths()
-			if err != nil {
-				return err
-			}
-			configuration, err := config.Load(paths.ConfigFile)
+			paths, configuration, err := configuredTaskPaths()
 			if err != nil {
 				return err
 			}
@@ -155,11 +151,7 @@ func newTaskRemoveRepositoryCommand(stdout io.Writer) *cobra.Command {
 			return nil
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			paths, err := config.ResolvePaths()
-			if err != nil {
-				return err
-			}
-			configuration, err := config.Load(paths.ConfigFile)
+			paths, configuration, err := configuredTaskPaths()
 			if err != nil {
 				return err
 			}
@@ -208,11 +200,7 @@ func newAgentLauncherCommand(agentLauncher launcher.AgentLauncher, stdin io.Read
 		Short: "Launch " + string(agentLauncher) + " for a Task",
 		Args:  launcherArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
-			paths, err := config.ResolvePaths()
-			if err != nil {
-				return err
-			}
-			configuration, err := config.Load(paths.ConfigFile)
+			paths, configuration, err := configuredTaskPaths()
 			if err != nil {
 				return err
 			}
@@ -247,7 +235,7 @@ func newTaskStatusCommand(stdout io.Writer) *cobra.Command {
 			return nil
 		},
 		RunE: func(_ *cobra.Command, args []string) error {
-			paths, err := config.ResolvePaths()
+			paths, _, err := configuredTaskPaths()
 			if err != nil {
 				return err
 			}
@@ -395,11 +383,7 @@ func newTaskAddCommand(stdout, stderr io.Writer) *cobra.Command {
 			return nil
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			paths, err := config.ResolvePaths()
-			if err != nil {
-				return err
-			}
-			configuration, err := config.Load(paths.ConfigFile)
+			paths, configuration, err := configuredTaskPaths()
 			if err != nil {
 				return err
 			}
@@ -442,11 +426,7 @@ func newTaskCommand(stdout, stderr io.Writer) *cobra.Command {
 			return nil
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			paths, err := config.ResolvePaths()
-			if err != nil {
-				return err
-			}
-			configuration, err := config.Load(paths.ConfigFile)
+			paths, configuration, err := configuredTaskPaths()
 			if err != nil {
 				return err
 			}
@@ -563,6 +543,18 @@ func newTaskListCommand(stdout io.Writer) *cobra.Command {
 	return command
 }
 
+func configuredTaskPaths() (config.Paths, config.Config, error) {
+	paths, err := config.ResolvePaths()
+	if err != nil {
+		return config.Paths{}, config.Config{}, err
+	}
+	configuration, err := config.Load(paths.ConfigFile)
+	if err != nil {
+		return config.Paths{}, config.Config{}, err
+	}
+	return paths.WithTaskWorkspaceRoot(configuration), configuration, nil
+}
+
 func newRepoCommand(stdout io.Writer) *cobra.Command {
 	repository := &cobra.Command{Use: "repo", Short: "Manage Registered Repositories"}
 	repository.AddCommand(newRepoAddCommand(stdout), newRepoListCommand(stdout))
@@ -660,7 +652,12 @@ func newInitCommand(stdout io.Writer) *cobra.Command {
 			if err := config.Initialize(paths); err != nil {
 				return err
 			}
-			_, err = fmt.Fprintf(stdout, "initialized devtask\nconfig: %s\ndata: %s\n", paths.ConfigFile, paths.DataDir)
+			configuration, err := config.Load(paths.ConfigFile)
+			if err != nil {
+				return err
+			}
+			paths = paths.WithTaskWorkspaceRoot(configuration)
+			_, err = fmt.Fprintf(stdout, "initialized devtask\nconfig: %s\ndata: %s\nTask Workspace root: %s\n", paths.ConfigFile, paths.DataDir, paths.Workspaces)
 			return err
 		},
 	}

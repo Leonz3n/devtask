@@ -82,10 +82,15 @@ devtask remove billing-rollout
 
 Task metadata and Task Workspaces use `$XDG_DATA_HOME/devtask` when `XDG_DATA_HOME` is absolute, or `~/.local/share/devtask` otherwise. Other commands never initialize state implicitly.
 
+Set the top-level `task_workspace_root` when Task Workspaces should be directly accessible in Finder or an agent that accepts only one directory. The value must be an absolute path; `~` is not expanded in YAML. Configure it before creating Tasks because devtask does not move existing Task Workspaces.
+
 A complete configuration can look like this:
 
 ```yaml
 schema_version: 1
+
+# Optional; must be absolute. Defaults to devtask/workspaces under the XDG data directory.
+task_workspace_root: /Users/me/DevTasks
 
 defaults:
   base_branch: main

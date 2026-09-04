@@ -101,6 +101,9 @@ func Create(paths config.Paths, configuration config.Config, name string, branch
 }
 
 func createLocked(paths config.Paths, configuration config.Config, name string, branchOverride *string) (*taskCreation, error) {
+	if err := os.MkdirAll(paths.Workspaces, 0o700); err != nil {
+		return nil, fmt.Errorf("create Task Workspace root %q: %w", paths.Workspaces, err)
+	}
 	if err := ensureAvailable(paths, name); err != nil {
 		return nil, err
 	}
